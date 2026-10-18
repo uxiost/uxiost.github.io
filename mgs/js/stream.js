@@ -14,6 +14,7 @@ export const TV_PREFIX = PEER_PREFIX + "tv-";
 // Debe instalarse antes de que arranque el emulador.
 
 const taps = new Map(); // AudioContext -> { tap, local }
+window.__mgsTaps = taps; // para diagnóstico
 let localMuted = false;
 
 export function installAudioTap() {
@@ -57,8 +58,8 @@ setInterval(resumeAudio, 2000);
 
 export function audioInfo() {
   const out = [];
-  for (const [ctx, { tap }] of taps) {
-    out.push({ state: ctx.state, rate: ctx.sampleRate, tracks: tap.stream.getAudioTracks().length });
+  for (const [ctx, { tap, local }] of taps) {
+    out.push({ state: ctx.state, rate: ctx.sampleRate, tracks: tap.stream.getAudioTracks().length, localGain: local.gain.value, muted: localMuted });
   }
   return out;
 }
