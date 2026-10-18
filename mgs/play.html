@@ -39,6 +39,26 @@
         <p class="muted small" id="quota"></p>
       </div>
 
+      <div class="card" id="tvbox">
+        <h2>📺 Ver en la tele sin cables</h2>
+        <p class="muted small">El juego corre en este móvil y la tele solo muestra la imagen (por la wifi de casa).</p>
+        <div class="row">
+          <button class="primary" id="castBtn">Enviar al Chromecast de la tele</button>
+          <select id="castRcv" aria-label="Receptor de Chromecast">
+            <option value="dashcast">Receptor: DashCast</option>
+            <option value="urlcast">Receptor: URL Cast</option>
+          </select>
+        </div>
+        <p class="muted small">Sin Chromecast: abre <b>uxiost.github.io/mgs/tv</b> en el navegador de la tele y escribe aquí su código.</p>
+        <form id="tvForm" class="row">
+          <input id="tvCode" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="código de la tele" maxlength="8">
+          <button>Conectar</button>
+          <button type="button" id="tvStop" hidden>Dejar de enviar</button>
+        </form>
+        <label class="small"><input type="checkbox" id="muteLocal" checked> Silenciar el móvil mientras se ve en la tele</label>
+        <p id="tvState" class="muted small"></p>
+      </div>
+
       <div class="card" id="link">
         <h2>Descargar desde un enlace</h2>
         <p class="muted small">Pega un enlace de archive.org (página <i>details</i> o <i>download</i>) o una URL directa a tu archivo. Se descarga una vez y queda guardado.</p>
@@ -66,9 +86,10 @@
     <details class="card">
       <summary>¿Cómo lo veo en la tele?</summary>
       <ol class="small">
-        <li><b>Pixel + cable USB-C → HDMI (la mejor):</b> con Android 16 la tele funciona como <i>segundo escritorio</i>. Abre esta página en el móvil, toca <b>Jugar</b> y arrastra la ventana de Chrome a la tele. Después abre <b>pad.html</b> en la pantalla del móvil: se conecta solo, sin red y sin retraso.</li>
-        <li><b>Si la tele solo duplica la pantalla</b> (cable o <i>Enviar pantalla</i>): juega aquí mismo. La imagen va en el centro y los botones táctiles quedan en las franjas laterales.</li>
-        <li><b>La tele como consola:</b> abre <b>test.html</b> en el navegador de la tele. Si sale ✅, abre ahí esta página y escanea el QR con el móvil.</li>
+        <li><b>Sin cables, con el Chromecast de la tele (LG con Chromecast integrado):</b> pulsa <b>“Enviar al Chromecast de la tele”</b> y elige tu tele. El juego corre en el móvil y la tele solo muestra la imagen. Si no carga, prueba con el otro receptor (URL Cast).</li>
+        <li><b>Sin cables, con el navegador de la tele:</b> abre <b>uxiost.github.io/mgs/tv</b> en la tele y escribe su código en “Ver en la tele”.</li>
+        <li><b>Por cable con Android 16:</b> la tele es un segundo escritorio. Pon esta página en la tele y abre <b>pad.html</b> en el móvil.</li>
+        <li><b>Duplicar pantalla</b> (cable o <i>Enviar pantalla</i>): juega aquí; los botones van en las franjas laterales.</li>
       </ol>
     </details>
   </section>
@@ -99,6 +120,7 @@
       <option value="300">5 min</option>
       <option value="0">Desactivado</option>
     </select></label>
+    <div id="menuTv"></div>
     <h3>Pantalla</h3>
     <div class="row">
       <label><input type="checkbox" id="optTouch"> Controles táctiles a los lados</label>

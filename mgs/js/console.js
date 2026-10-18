@@ -5,6 +5,10 @@ import * as store from "./storage.js";
 import { PEER_PREFIX, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js";
 import { attachTouchPad, PAD_HTML } from "./padui.js";
 import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js";
+import { installAudioTap, setLocalMuted, streamTo, castPage } from "./stream.js";
+
+// Antes de que arranque el emulador: así podemos mandar su audio a la tele.
+installAudioTap();
 
 const EJS_DATA = "https://cdn.emulatorjs.org/4.2.3/data/";
 const GAME_NAME = "Metal Gear Solid"; // misma Memory Card para ambos discos
@@ -317,6 +321,7 @@ $("#hud").addEventListener("pointerdown", () => { $("#hud").classList.remove("fa
 $("#hudMenu").onclick = openMenu;
 
 function openMenu() {
+  $("#menuTv").appendChild($("#tvbox")); // el mismo panel de "Ver en la tele", dentro del menú
   renderStateList();
   $("#interval").value = String(intervalSeconds());
   $("#menu").showModal();
@@ -419,10 +424,12 @@ async function acceptPad(conn) {
       setTimeout(() => conn.close(), 500);
       return;
     }
-    const pad = { conn, player, mask: 0 };
+    // La pantalla de la tele (screen.html) también abre este canal para reenviar
+    // su mando; no cuenta como "mando conectado" a efectos de ocultar los táctiles.
+    const pad = { conn, player, mask: 0, tv: !!(conn.metadata && conn.metadata.tv) };
     pads.set(conn.connectionId, pad);
     conn.send({ t: "hello", player, running: started, disc: currentSlot, discs: await store.listDiscs() });
-    toast(`Mando ${player + 1} conectado`);
+    toast(pad.tv ? "Tele conectada" : `Mando ${player + 1} conectado`);
     updateHud();
     renderPads();
   });
@@ -604,7 +611,7 @@ function touchMode() {
 
 function applyTouchMode() {
   // Fuera si hay un mando Bluetooth o un móvil conectado como mando.
-  const on = touchMode() && !hasGamepad() && pads.size === 0;
+  const on = touchMode() && !hasGamepad() && ![...pads.values()].some(p => !p.tv);
   document.body.classList.toggle("touch", on);
   $("#optTouch").checked = touchMode();
   if (!on) {
@@ -716,11 +723,71 @@ async function runDownload(job, label, slotChoice, url, autoplay) {
   }
 }
 
+// ---------------------------------------------------------------- ver en la tele (streaming)
+
+let tvStream = null;
+
+function peerReady() {
+  return new Promise(resolve => {
+    if (peer && peer.open) return resolve();
+    const t = setInterval(() => { if (peer && peer.open) { clearInterval(t); resolve(); } }, 200);
+  });
+}
+
+function tvStatus(msg, ok) {
+  const el = $("#tvState");
+  el.textContent = msg;
+  el.style.color = ok ? "var(--accent)" : "";
+  if (ok) toast(msg);
+}
+
+async function startTv(tvCode) {
+  tvCode = tvCode.trim().toLowerCase();
+  if (!tvCode) return;
+  stopTv();
+  localStorage.setItem("mgs.tv", tvCode);
+  $("#tvStop").hidden = false;
+  if ($("#muteLocal").checked) setLocalMuted(true);
+  await peerReady();
+  const canvas = () => (started && window.EJS_emulator && window.EJS_emulator.started ? window.EJS_emulator.canvas : null);
+  tvStream = streamTo(peer, tvCode, canvas, peer.id, tvStatus);
+}
+
+function stopTv() {
+  if (tvStream) tvStream.stop();
+  tvStream = null;
+  localStorage.removeItem("mgs.tv");
+  setLocalMuted(false);
+  $("#tvStop").hidden = true;
+  $("#tvState").textContent = "";
+}
+
+$("#tvForm").onsubmit = e => { e.preventDefault(); startTv($("#tvCode").value); };
+$("#tvStop").onclick = stopTv;
+$("#muteLocal").onchange = e => setLocalMuted(!!tvStream && e.target.checked);
+$("#castBtn").onclick = async () => {
+  const tvCode = randomCode();
+  const url = new URL("screen.html#" + tvCode, location.href).href;
+  try {
+    tvStatus("Elige tu tele en la lista…");
+    await castPage(url, $("#castRcv").value);
+    tvStatus("Abriendo la pantalla en la tele…");
+    startTv(tvCode);
+  } catch (err) {
+    console.error(err);
+    tvStatus(err.message || String(err));
+  }
+};
+
 // ---------------------------------------------------------------- arranque
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 renderDiscs();
 startPeer(codeForPeer());
+if (localStorage.getItem("mgs.tv")) {
+  $("#tvCode").value = localStorage.getItem("mgs.tv");
+  startTv(localStorage.getItem("mgs.tv"));
+}
 
 const autoDisc = params.get("disc");
 const src = params.get("src");

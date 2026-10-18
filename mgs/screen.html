@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <title>Pantalla — MGS Web</title>
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    [hidden] { display: none !important; }
+    html, body { background: #000; height: 100%; overflow: hidden; }
+    #video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+    #wait {
+      position: fixed; inset: 0; display: grid; place-content: center; gap: 18px; text-align: center;
+      padding: 5vh 5vw;
+    }
+    #wait .code { font-size: clamp(3rem, 12vw, 9rem); letter-spacing: .2em; line-height: 1; }
+    #wait p { font-size: clamp(1rem, 2.2vw, 1.6rem); margin: 0; }
+    #sound {
+      position: fixed; left: 50%; bottom: 6vh; transform: translateX(-50%);
+      font-size: clamp(1rem, 2.4vw, 1.8rem); padding: .7em 1.3em; z-index: 5;
+    }
+    #stat { position: fixed; right: 12px; bottom: 10px; font: 12px ui-monospace, monospace; color: #6a7d66; z-index: 4; }
+  </style>
+</head>
+<body>
+  <video id="video" playsinline autoplay></video>
+  <div id="wait">
+    <h1 class="brand" style="margin:0">PANTALLA <span style="color:var(--accent)">TV</span></h1>
+    <p class="muted">En el móvil, abre <b>uxiost.github.io/mgs/play.html</b> → <b>Ver en la tele</b> y escribe:</p>
+    <div class="code" id="code">·····</div>
+    <p class="muted" id="state">Preparando…</p>
+    <p class="muted small">El juego corre en el móvil; esta pantalla solo muestra la imagen. Puedes jugar con un mando Bluetooth emparejado con la tele o con los botones de colores del mando de la tele.</p>
+  </div>
+  <button id="sound" class="primary" hidden>🔊 Pulsa OK para activar el sonido</button>
+  <div id="stat"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+  <script type="module">
+    import { PEER_PREFIX, BUTTONS, randomCode } from "./js/protocol.js";
+    import { TV_PREFIX, preferH264, lowLatencyReceivers } from "./js/stream.js";
+
+    const $ = s => document.querySelector(s);
+    const video = $("#video");
+    // El código puede venir en la dirección (#abcde) cuando la abre el móvil vía Chromecast.
+    const code = (location.hash.slice(1) || randomCode()).toLowerCase();
+    $("#code").textContent = code.toUpperCase();
+
+    let peer, ctrl = null, mask = 0, lastSent = 0;
+
+    function start() {
+      peer = new Peer(TV_PREFIX + code, { debug: 1 });
+      peer.on("open", () => { $("#state").textContent = "Esperando al móvil…"; });
+      peer.on("disconnected", () => setTimeout(() => !peer.destroyed && peer.reconnect(), 1500));
+      peer.on("error", e => {
+        $("#state").textContent = `Error de conexión (${e.type}). Reintentando…`;
+        if (e.type === "unavailable-id") { peer.destroy(); setTimeout(start, 3000); }
+      });
+      peer.on("call", call => {
+        call.answer(undefined, { sdpTransform: preferH264 });
+        call.on("stream", s => show(s, call));
+        call.on("close", () => { $("#wait").hidden = false; $("#state").textContent = "El móvil se ha desconectado. Esperando…"; });
+        // Canal de vuelta: el mando de la tele llega al móvil como un mando más.
+        const consoleId = call.metadata && call.metadata.console;
+        if (consoleId && (!ctrl || !ctrl.open)) connectCtrl(consoleId);
+      });
+    }
+
+    function show(stream, call) {
+      video.srcObject = stream;
+      lowLatencyReceivers(call.peerConnection);
+      $("#wait").hidden = true;
+      video.muted = false;
+      video.play().catch(() => {
+        // Sin interacción previa algunas teles no dejan sonar el audio.
+        video.muted = true;
+        video.play().catch(() => {});
+        $("#sound").hidden = false;
+        $("#sound").focus();
+      });
+    }
+
+    $("#sound").onclick = () => { video.muted = false; video.play(); $("#sound").hidden = true; };
+
+    function connectCtrl(id) {
+      ctrl = peer.connect(id, { serialization: "json", reliable: true, metadata: { tv: true } });
+      ctrl.on("close", () => { ctrl = null; });
+      ctrl.on("error", () => { ctrl = null; });
+    }
+
+    // ---- entrada desde la tele: mando Bluetooth (API Gamepad, mapeo estándar) y mando de la tele
+    const PAD_MAP = { 0: "cross", 1: "circle", 2: "square", 3: "triangle", 4: "l1", 5: "r1", 6: "l2", 7: "r2",
+      8: "select", 9: "start", 10: "l3", 11: "r3", 12: "up", 13: "down", 14: "left", 15: "right" };
+    // Mando de LG: flechas, OK = ✕, colores: rojo ○, verde △, amarillo □, azul START.
+    const KEY_MAP = { 37: "left", 38: "up", 39: "right", 40: "down", 13: "cross",
+      403: "circle", 404: "triangle", 405: "square", 406: "start" };
+    const keys = new Set();
+
+    window.addEventListener("keydown", e => {
+      if (!$("#sound").hidden && e.keyCode === 13) return; // OK activa el sonido
+      const b = KEY_MAP[e.keyCode];
+      if (b) { keys.add(b); e.preventDefault(); }
+    });
+    window.addEventListener("keyup", e => { const b = KEY_MAP[e.keyCode]; if (b) keys.delete(b); });
+
+    function poll() {
+      const pressed = new Set(keys);
+      for (const gp of navigator.getGamepads ? navigator.getGamepads() : []) {
+        if (!gp) continue;
+        gp.buttons.forEach((b, i) => { if (b.pressed && PAD_MAP[i]) pressed.add(PAD_MAP[i]); });
+        // Stick izquierdo como cruceta (MGS1 se juega con cruceta).
+        const [x = 0, y = 0] = gp.axes;
+        if (x < -0.5) pressed.add("left");
+        if (x > 0.5) pressed.add("right");
+        if (y < -0.5) pressed.add("up");
+        if (y > 0.5) pressed.add("down");
+      }
+      let m = 0;
+      for (const n of pressed) m |= 1 << BUTTONS[n];
+      if (ctrl && ctrl.open && (m !== mask || Date.now() - lastSent > 250)) {
+        ctrl.send({ t: "s", b: m });
+        mask = m;
+        lastSent = Date.now();
+      }
+      requestAnimationFrame(poll);
+    }
+    poll();
+
+    // Estadísticas pequeñas para ver el retraso real.
+    setInterval(async () => {
+      const pc = Object.values(peer?.connections || {}).flat().find(c => c.type === "media")?.peerConnection;
+      if (!pc) return;
+      const stats = await pc.getStats();
+      stats.forEach(r => {
+        if (r.type === "inbound-rtp" && r.kind === "video") {
+          const fps = r.framesPerSecond ? Math.round(r.framesPerSecond) : "?";
+          const jb = r.jitterBufferEmittedCount ? Math.round(1000 * r.jitterBufferDelay / r.jitterBufferEmittedCount) : "?";
+          $("#stat").textContent = `${r.frameWidth || "?"}×${r.frameHeight || "?"} · ${fps} fps · búfer ${jb} ms · ${r.decoderImplementation || ""}`;
+        }
+      });
+    }, 2000);
+
+    start();
+  </script>
+</body>
+</html>

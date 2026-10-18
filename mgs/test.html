@@ -111,6 +111,13 @@
         a.close(); b.close();
         return { ok: d === "ping", msg: "El canal de datos funciona." };
       }),
+      row("Vídeo del móvil (decodificación H.264)", async () => {
+        const caps = window.RTCRtpReceiver && RTCRtpReceiver.getCapabilities ? RTCRtpReceiver.getCapabilities("video") : null;
+        if (!caps) return { ok: "warn", msg: "No se puede saber qué códecs recibe." };
+        const names = [...new Set(caps.codecs.map(c => c.mimeType.split("/")[1]))].filter(n => !/rtx|red|ulpfec|flexfec/i.test(n));
+        const h264 = names.some(n => /h264/i.test(n));
+        return { ok: h264 ? true : "warn", msg: `Recibe: ${names.join(", ")}${h264 ? "" : " (sin H.264 irá por software: puede ir más lento)"}` };
+      }),
       row("Servidor de emparejamiento (PeerJS)", async () => {
         if (!window.Peer) return { ok: false, msg: "No cargó la librería PeerJS." };
         const p = new Peer({ debug: 0 });
@@ -138,17 +145,16 @@
       const canRun = get("WebAssembly").ok === true && get("WebGL").ok === true;
       const fast = (get("Potencia").score || 0) >= 0.6;
       const rtc = get("WebRTC").ok === true && get("Servidor").ok === true;
-      if (!canRun) {
+      if (rtc) {
+        v.textContent = fast && canRun
+          ? "✅ Esta tele vale para todo. Lo más fluido: que el juego corra en el móvil y aquí se vea la imagen (abre uxiost.github.io/mgs/tv). También puede ser la consola (play.html) con el móvil como mando."
+          : "✅ Abre uxiost.github.io/mgs/tv en esta tele: el juego corre en el móvil y aquí solo se ve la imagen (la potencia de la tele no importa).";
+      } else if (canRun) {
         v.classList.add("bad");
-        v.textContent = "Este navegador no puede ejecutar el emulador. Juega en el móvil y envía la imagen a la tele (cable USB-C → HDMI o “Enviar pantalla”).";
-      } else if (fast && rtc) {
-        v.textContent = "✅ Esta pantalla puede ser la consola: abre play.html aquí y usa el móvil como mando.";
-      } else if (!rtc) {
-        v.classList.add("bad");
-        v.textContent = `Puede ejecutar el emulador${fast ? "" : " (justo de potencia)"}, pero el móvil no podrá hacer de mando aquí. Usa un mando Bluetooth con la tele o juega en el móvil y envía la imagen.`;
+        v.textContent = `Sin WebRTC: esta tele no puede recibir la imagen ni el mando del móvil. Puede ser la consola con un mando Bluetooth emparejado a la tele${fast ? "" : " (justo de potencia)"}. Si no, usa el Chromecast de la tele desde el móvil (play.html → Ver en la tele).`;
       } else {
         v.classList.add("bad");
-        v.textContent = "Funciona todo, pero el procesador es lento: probablemente irá a tirones. Mejor que el juego corra en el móvil y envíes la imagen a la tele.";
+        v.textContent = "Este navegador no sirve. Usa el Chromecast de la tele desde el móvil (play.html → Ver en la tele) o “Enviar pantalla”.";
       }
     });
 
