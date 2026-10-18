@@ -714,7 +714,8 @@ async function runDownload(job, label, slotChoice, url, autoplay) {
     const bookmark = new URL(location.pathname, location.href);
     bookmark.searchParams.set("src", url);
     text.innerHTML = `Listo. Enlace para favoritos: <span class="break">${escapeHtml(bookmark.href)}</span>`;
-    if (autoplay) startGame(slot);
+    // Si ya estás enviando a la tele, al terminar la descarga arranca solo.
+    if (autoplay || tvStream) startGame(slot);
   } catch (err) {
     console.error(err);
     text.textContent = err.message || String(err);
@@ -762,7 +763,26 @@ function stopTv() {
   $("#tvState").textContent = "";
 }
 
-$("#tvForm").onsubmit = e => { e.preventDefault(); startTv($("#tvCode").value); };
+$("#tvForm").onsubmit = async e => {
+  e.preventDefault();
+  await startTv($("#tvCode").value);
+  await playAfterTvConnect();
+};
+
+// Lo que la tele muestra sale del juego en marcha: si aún no has pulsado Jugar,
+// arrancamos el primer disco guardado. Si no hay ninguno, lo decimos claro.
+async function playAfterTvConnect() {
+  if (started) return;
+  const discs = await store.listDiscs();
+  const first = discs.find(d => d.slot === "disc1") || discs[0];
+  if (first) {
+    toast(`Arrancando ${first.name} en la tele…`, 4000);
+    startGame(first.slot);
+  } else {
+    toast("Tele lista. Ahora carga tu disco: pega el enlace o elige el archivo.", 6000);
+    $("#link").scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+}
 $("#tvStop").onclick = stopTv;
 $("#muteLocal").onchange = e => setLocalMuted(!!tvStream && e.target.checked);
 $("#castBtn").onclick = async () => {
@@ -772,7 +792,8 @@ $("#castBtn").onclick = async () => {
     tvStatus("Elige tu tele en la lista…");
     await castPage(url, $("#castRcv").value);
     tvStatus("Abriendo la pantalla en la tele…");
-    startTv(tvCode);
+    await startTv(tvCode);
+    await playAfterTvConnect();
   } catch (err) {
     console.error(err);
     tvStatus(err.message || String(err));

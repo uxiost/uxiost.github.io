@@ -28,7 +28,7 @@
   <video id="video" playsinline autoplay></video>
   <div id="wait">
     <h1 class="brand" style="margin:0">PANTALLA <span style="color:var(--accent)">TV</span></h1>
-    <p class="muted">En el móvil, abre <b>uxiost.github.io/mgs/play.html</b> → <b>Ver en la tele</b> y escribe:</p>
+    <p class="muted" id="howto">En el móvil, abre <b>uxiost.github.io/mgs/play.html</b> → <b>Ver en la tele</b> y escribe:</p>
     <div class="code" id="code">·····</div>
     <p class="muted" id="state">Preparando…</p>
     <p class="muted small">El juego corre en el móvil; esta pantalla solo muestra la imagen. Puedes jugar con un mando Bluetooth emparejado con la tele o con los botones de colores del mando de la tele.</p>
@@ -44,8 +44,13 @@
     const $ = s => document.querySelector(s);
     const video = $("#video");
     // El código puede venir en la dirección (#abcde) cuando la abre el móvil vía Chromecast.
+    const fromPhone = location.hash.length > 1; // abierta por el móvil vía Chromecast
     const code = (location.hash.slice(1) || randomCode()).toLowerCase();
     $("#code").textContent = code.toUpperCase();
+    if (fromPhone) {
+      $("#howto").textContent = "Abierta desde tu móvil: se conecta solo, no hace falta escribir nada.";
+      $("#code").style.fontSize = "clamp(1.5rem, 4vw, 3rem)";
+    }
 
     let peer, ctrl = null, mask = 0, lastSent = 0;
 
@@ -56,6 +61,11 @@
       peer.on("error", e => {
         $("#state").textContent = `Error de conexión (${e.type}). Reintentando…`;
         if (e.type === "unavailable-id") { peer.destroy(); setTimeout(start, 3000); }
+      });
+      // Avisos del móvil ("pulsa Jugar", "recibiendo…").
+      peer.on("connection", c => {
+        if (!(c.metadata && c.metadata.status)) return c.close();
+        c.on("data", m => { if (m && m.t === "status" && m.msg) $("#state").textContent = m.msg; });
       });
       peer.on("call", call => {
         call.answer(undefined, { sdpTransform: preferH264 });

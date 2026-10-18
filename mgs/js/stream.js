@@ -105,18 +105,35 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
   let timer = null;
   const started = Date.now();
 
+  // Canal de avisos: la tele enseña en pantalla qué está pasando en el móvil
+  // (y si llega, sabemos que la conexión entre los dos funciona).
+  let statusConn = null;
+  let lastTvMsg = "";
+  const tell = msg => {
+    lastTvMsg = msg;
+    if (statusConn && statusConn.open) statusConn.send({ t: "status", msg });
+  };
+  const openStatus = () => {
+    if (stopped || (statusConn && statusConn.open)) return;
+    statusConn = peer.connect(TV_PREFIX + tvCode, { serialization: "json", metadata: { status: true } });
+    statusConn.on("open", () => statusConn.send({ t: "status", msg: lastTvMsg }));
+  };
+  const say = (msg, ok, tvMsg) => { onStatus(msg, ok); tell(tvMsg || msg); };
+
   const attempt = () => {
     if (stopped) return;
+    openStatus();
     const canvas = getCanvas();
     if (!canvas) {
-      onStatus("Arranca el juego para enviarlo a la tele");
+      say("Tele lista. Ahora pulsa ▶ Jugar en un disco (o carga uno).", false,
+        "Móvil conectado ✓ · Ahora pulsa ▶ Jugar en el móvil");
       timer = setTimeout(attempt, 1500);
       return;
     }
     const stream = canvas.captureStream(60);
     stream.getVideoTracks().forEach(t => { t.contentHint = "motion"; });
     audioTracks().forEach(t => stream.addTrack(t));
-    onStatus("Conectando con la tele…");
+    say("Conectando con la tele…", false, "Recibiendo el juego…");
     const c = peer.call(TV_PREFIX + tvCode, stream, {
       metadata: { console: consoleId },
       sdpTransform: preferH264,
@@ -131,7 +148,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
       if (st === "connected" && !connected) {
         connected = true;
         tuneSenders(pc, canvas);
-        onStatus("En la tele ✓", true);
+        say("En la tele ✓", true);
       }
       if (["failed", "closed", "disconnected"].includes(st)) {
         clearInterval(pcWatch);
@@ -151,9 +168,9 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
     try { old && old.close(); } catch (e) { /* ya cerrada */ }
     clearTimeout(timer);
     if (Date.now() - started > 3 * 60 * 1000) {
-      onStatus("No encuentro la tele. ¿Está abierta la pantalla con ese código?");
+      say("No encuentro la tele. ¿Está abierta la pantalla con ese código?");
     } else {
-      onStatus("Esperando a la tele…");
+      say("Esperando a la tele…");
     }
     timer = setTimeout(attempt, 2000);
   };
@@ -173,6 +190,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
       const old = call;
       call = null;
       try { old && old.close(); } catch (e) { /* ya cerrada */ }
+      try { statusConn && statusConn.close(); } catch (e) { /* ya cerrada */ }
     },
   };
 }
