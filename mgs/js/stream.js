@@ -98,7 +98,8 @@ export function preferH264(sdp) {
 export function boostBitrate(sdp) {
   const lines = sdp.split("\r\n");
   const vp8 = lines.filter(l => /^a=rtpmap:\d+ (VP8|H264)\/90000/i.test(l)).map(l => l.match(/^a=rtpmap:(\d+)/)[1]);
-  const extra = "x-google-start-bitrate=2000;x-google-min-bitrate=800;x-google-max-bitrate=3500";
+  // Sin mínimo forzado: si la wifi o la tele no dan abasto, el emisor debe poder bajar.
+  const extra = "x-google-start-bitrate=1000;x-google-max-bitrate=1800";
   for (const pt of vp8) {
     const i = lines.findIndex(l => l.startsWith(`a=fmtp:${pt} `));
     if (i >= 0) {
@@ -120,13 +121,14 @@ export function lowLatencyReceivers(pc) {
 
 // La tele del Chromecast decodifica VP8 por software y va justa de CPU:
 // 480 líneas y 30 fps sobran para PS1 (240–480 de origen).
-const MAX_LINES = 480;
+const MAX_LINES = 360;
 const FPS = 30;
 
 // Copiamos solo la imagen del juego (4:3, sin las bandas negras del lienzo del
 // emulador) a un lienzo fijo de 640×480. Así la resolución en la tele no depende
-// de cómo sujetes el móvil.
-const OUT_W = 640, OUT_H = 480;
+// de cómo sujetes el móvil. 480×360 supera la resolución nativa de MGS1 (320×240)
+// y es lo que el decodificador por software de la tele aguanta con holgura.
+const OUT_W = 480, OUT_H = 360;
 function gameFeed(src) {
   const out = document.createElement("canvas");
   out.width = OUT_W;
@@ -150,10 +152,9 @@ function gameFeed(src) {
 
 async function tuneVideoSender(sender, height) {
   const p = sender.getParameters();
-  // Resolución fija y baja (640×480): mejor bajar fps que emborronar la imagen.
-  p.degradationPreference = "maintain-resolution";
+  p.degradationPreference = "balanced";
   p.encodings = p.encodings && p.encodings.length ? p.encodings : [{}];
-  p.encodings[0].maxBitrate = 3_500_000;
+  p.encodings[0].maxBitrate = 1_500_000;
   p.encodings[0].maxFramerate = FPS;
   p.encodings[0].scaleResolutionDownBy = Math.max(1, (height || MAX_LINES) / MAX_LINES);
   try { await sender.setParameters(p); } catch (e) { console.warn("setParameters", e); }
@@ -315,7 +316,11 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
           upgradeTracks();
         }
       }
-      if (["failed", "closed", "disconnected"].includes(st)) {
+      // "disconnected" suele recuperarse solo en unos segundos: no colgar por eso.
+      if (st === "disconnected") c.__discSince = c.__discSince || Date.now();
+      else c.__discSince = 0;
+      const longDisc = c.__discSince && Date.now() - c.__discSince > 8000;
+      if (st === "failed" || st === "closed" || longDisc) {
         clearInterval(pcWatch);
         retry();
       }

@@ -16,8 +16,12 @@ function safe(o) {
   try { return JSON.stringify(o).slice(0, 300); } catch (e) { return String(o); }
 }
 
+let lastKey = "";
 export function report(role, stage, data = {}) {
-  if (sent++ > 40) return; // no inundar el canal
+  const key = role + stage + JSON.stringify(data);
+  if (key === lastKey) return; // repetido
+  lastKey = key;
+  if (sent++ > 150) return; // no inundar el canal
   const body = JSON.stringify({ role, stage, t: new Date().toISOString(), ...data, log: log.slice(-12) });
   fetch(`https://ntfy.sh/${TOPIC}`, { method: "POST", body: body.slice(0, 3900) }).catch(() => {});
 }

@@ -66,7 +66,11 @@
       $("#code").style.fontSize = "clamp(1.5rem, 4vw, 3rem)";
     }
 
-    let peer, ctrl = null, mask = 0, lastSent = 0;
+    let peer, ctrl = null, mask = 0, lastSent = 0, currentCall = null;
+    // En el Chromecast el audio de WebRTC no sale por el reproductor de vídeo:
+    // lo sacamos por Web Audio, que usa otra ruta de salida.
+    const isCast = /CrKey/.test(navigator.userAgent);
+    let audioCtx = null, audioSrc = null, audioTrackId = "";
 
     function start() {
       peer = new Peer(TV_PREFIX + code, { debug: 3, logFunction: (lvl, ...a) => remember(...a) });
@@ -78,12 +82,20 @@
         if (e.type === "unavailable-id") { peer.destroy(); setTimeout(start, 3000); }
       });
       peer.on("call", call => {
+        // Una sola llamada a la vez: si el móvil reconecta, la anterior se cuelga
+        // (dos vídeos a la vez ahogan el procesador de la tele).
+        if (currentCall && currentCall !== call) { try { currentCall.close(); } catch (e) {} }
+        currentCall = call;
         call.answer(undefined, { sdpTransform: boostBitrate });
         report("tv", "call", { code });
         call.peerConnection && (call.peerConnection.onconnectionstatechange = () =>
           report("tv", "pc-state", { code, st: call.peerConnection.connectionState }));
-        call.on("stream", s => show(s, call));
-        call.on("close", () => { $("#wait").hidden = false; $("#state").textContent = "El móvil se ha desconectado. Esperando…"; });
+        call.on("stream", s => { if (call === currentCall) show(s, call); });
+        call.on("close", () => {
+          if (call !== currentCall) return;
+          $("#wait").hidden = false;
+          $("#state").textContent = "El móvil se ha desconectado. Esperando…";
+        });
         // Canal de vuelta: el mando de la tele llega al móvil como un mando más.
         // (El Chromecast de las LG no tiene canales de datos: ahí no hay canal de vuelta
         // y se juega con el móvil o con un mando emparejado al móvil.)
@@ -112,7 +124,11 @@
       if (video.srcObject !== stream) video.srcObject = stream;
       lowLatencyReceivers(call.peerConnection);
       $("#wait").hidden = true;
+      if (isCast) routeAudioWebAudio(stream);
+      // El reproductor debe seguir "sonando" para que el audio de WebRTC fluya hacia
+      // Web Audio: sin silenciar, pero a volumen 0 cuando el sonido sale por Web Audio.
       video.muted = false;
+      video.volume = isCast && audioSrc ? 0 : 1;
       video.play().catch(err => {
         if (err && err.name === "AbortError") return; // otra carga en curso; no es un bloqueo
         // Sin interacción previa algunas teles no dejan sonar el audio.
@@ -122,6 +138,62 @@
         $("#sound").hidden = false;
         $("#sound").focus();
       });
+      if (!show.reported) {
+        show.reported = true;
+        setTimeout(() => reportAV(currentCall, "av-15s"), 15000);
+        setTimeout(() => reportAV(currentCall, "av-60s"), 60000);
+      }
+    }
+
+    function routeAudioWebAudio(stream) {
+      const track = stream.getAudioTracks()[0];
+      if (!track || track.id === audioTrackId) return;
+      try {
+        audioCtx = audioCtx || new AudioContext({ latencyHint: "interactive" });
+        if (audioSrc) audioSrc.disconnect();
+        audioSrc = audioCtx.createMediaStreamSource(new MediaStream([track]));
+        audioSrc.connect(audioCtx.destination);
+        audioTrackId = track.id;
+        window.__mgsAudio = { ctx: audioCtx, src: audioSrc }; // para depurar
+        audioCtx.resume().catch(() => {});
+        // Si Web Audio no arranca, volvemos al audio del reproductor de vídeo.
+        setTimeout(() => {
+          if (audioCtx.state !== "running") { video.volume = 1; report("tv", "webaudio-not-running", { code, st: audioCtx.state }); }
+        }, 2000);
+      } catch (e) {
+        audioSrc = null;
+        report("tv", "webaudio-error", { code, msg: String(e) });
+      }
+    }
+
+    // Informe de audio y vídeo a los 10 s: ¿llega audio con energía? ¿se congela la imagen?
+    // Pico de señal que de verdad entra en Web Audio durante 1 s.
+    async function webAudioPeak() {
+      if (!audioCtx || !audioSrc) return null;
+      const an = audioCtx.createAnalyser();
+      an.fftSize = 2048;
+      audioSrc.connect(an);
+      const buf = new Float32Array(2048);
+      let peak = 0;
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        an.getFloatTimeDomainData(buf);
+        for (const x of buf) peak = Math.max(peak, Math.abs(x));
+      }
+      audioSrc.disconnect(an);
+      return Math.round(peak * 1000) / 1000;
+    }
+
+    async function reportAV(call, stage) {
+      const pc = call && call.peerConnection;
+      if (!pc) return;
+      const out = { code, isCast, ctx: audioCtx && audioCtx.state, videoMuted: video.muted, vol: video.volume, paused: video.paused, waPeak: await webAudioPeak() };
+      (await pc.getStats()).forEach(r => {
+        if (r.type !== "inbound-rtp") return;
+        if (r.kind === "audio") Object.assign(out, { aPkts: r.packetsReceived, aLost: r.packetsLost, aEnergy: r.totalAudioEnergy, aLevel: r.audioLevel, aConcealed: r.concealedSamples, aSamples: r.totalSamplesReceived });
+        if (r.kind === "video") Object.assign(out, { vW: r.frameWidth, vH: r.frameHeight, fps: r.framesPerSecond, dec: r.framesDecoded, drop: r.framesDropped, freezes: r.freezeCount, freezeS: r.totalFreezesDuration, lost: r.packetsLost, decMs: r.framesDecoded ? Math.round(1000 * r.totalDecodeTime / r.framesDecoded) : null });
+      });
+      report("tv", stage, out);
     }
 
     $("#sound").onclick = () => { video.muted = false; video.play(); $("#sound").hidden = true; };
@@ -172,7 +244,7 @@
 
     // Estadísticas pequeñas para ver el retraso real.
     setInterval(async () => {
-      const pc = Object.values(peer?.connections || {}).flat().find(c => c.type === "media")?.peerConnection;
+      const pc = currentCall && currentCall.peerConnection;
       if (!pc) return;
       const stats = await pc.getStats();
       stats.forEach(r => {
