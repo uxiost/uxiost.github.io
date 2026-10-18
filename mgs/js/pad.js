@@ -1,4 +1,8 @@
-// Mando táctil: convierte el móvil en un mando de PS1 conectado por WebRTC a la consola.
+// Mando táctil: convierte el móvil en un mando de PS1 conectado a la consola.
+// Dos caminos:
+//  - Misma máquina (p. ej. Pixel con la tele por cable como segundo escritorio):
+//    BroadcastChannel entre ventanas de Chrome. Sin red y sin retraso.
+//  - Otro dispositivo (la tele o un PC): WebRTC con PeerJS.
 
 import { PEER_PREFIX, FILE_CHUNK, formatBytes } from "./protocol.js";
 import { attachTouchPad } from "./padui.js";
@@ -12,6 +16,11 @@ let code = null;
 let mask = 0;
 let retry = 0;
 let vibe = localStorage.getItem("mgs.vibe") !== "0";
+
+const bc = "BroadcastChannel" in window ? new BroadcastChannel("mgs-web") : null;
+const padId = Math.random().toString(36).slice(2);
+let local = false;    // conectado a una consola en este mismo dispositivo
+let lastBeat = 0;
 
 // ---------------------------------------------------------------- UI
 
@@ -33,6 +42,7 @@ function setStatus(text, ok) {
 // ---------------------------------------------------------------- conexión
 
 function connect() {
+  if (local) return;
   if (!peer || peer.destroyed) {
     peer = new Peer({ debug: 1 });
     peer.on("open", openConn);
@@ -83,7 +93,49 @@ function onMessage(msg) {
 }
 
 function send(msg) {
-  if (conn && conn.open) conn.send(msg);
+  if (local) bc.postMessage({ from: padId, ...msg });
+  else if (conn && conn.open) conn.send(msg);
+}
+
+// ---------------------------------------------------------------- consola local (misma máquina)
+
+function tryLocal(timeout = 700) {
+  if (!bc) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const t = setTimeout(() => resolve(false), timeout);
+    pendingLocal = ok => { clearTimeout(t); resolve(ok); };
+    bc.postMessage({ from: padId, t: "hello?" });
+  });
+}
+let pendingLocal = null;
+
+if (bc) {
+  bc.onmessage = e => {
+    const m = e.data;
+    if (!m || m.to !== padId) return;
+    lastBeat = Date.now();
+    if (m.t === "hello") {
+      if (!local) {
+        local = true;
+        clearTimeout(retryTimer);
+        if (conn) { conn.close(); conn = null; }
+        toast("Conectado a la consola de este móvil");
+      }
+      if (pendingLocal) { pendingLocal(true); pendingLocal = null; }
+    }
+    if (m.t === "beat") return;
+    onMessage(m);
+  };
+  // Si la consola local se cierra, volvemos a buscarla (y a la remota, si hay código).
+  setInterval(async () => {
+    if (local && Date.now() - lastBeat > 3500) {
+      local = false;
+      setStatus("Consola cerrada");
+      if (code) connect();
+    }
+    if (!local && !(conn && conn.open)) await tryLocal();
+  }, 2000);
+  window.addEventListener("pagehide", () => bc.postMessage({ from: padId, t: "bye" }));
 }
 
 function sendState() {
@@ -161,6 +213,12 @@ async function keepAwake() {
 // ---------------------------------------------------------------- envío de disco
 
 function sendDisc(file, slot) {
+  if (local) {
+    // Misma máquina: se pasa el archivo tal cual, sin copiarlo por la red.
+    bc.postMessage({ from: padId, t: "file", file, slot });
+    $("#sendText").textContent = "Disco enviado a la consola";
+    return;
+  }
   if (!peer || !peer.open) return toast("No conectado");
   const prog = $("#sendProg");
   const text = $("#sendText");
@@ -203,13 +261,15 @@ function sendDisc(file, slot) {
 
 // ---------------------------------------------------------------- arranque
 
-function start(c) {
-  code = c.trim().toLowerCase();
-  localStorage.setItem("mgs.padcode", code);
+async function start(c) {
+  code = c ? c.trim().toLowerCase() : null;
+  if (code) localStorage.setItem("mgs.padcode", code);
   $("#join").classList.add("hidden");
   $("#pad").classList.remove("hidden");
   keepAwake();
-  connect();
+  // Primero, ¿hay una consola abierta en este mismo dispositivo?
+  if (await tryLocal()) return;
+  if (code) connect();
 }
 
 $("#joinForm").onsubmit = e => {
@@ -228,4 +288,4 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
 
 const initial = location.hash.slice(1) || localStorage.getItem("mgs.padcode");
 if (initial) start(initial);
-else $("#join").classList.remove("hidden");
+else tryLocal().then(ok => ok ? start(null) : $("#join").classList.remove("hidden"));

@@ -1,6 +1,6 @@
 // Service worker: guarda la app (no el juego) para que abra rápido y se pueda
 // "instalar" como app en el móvil. El núcleo del emulador lo cachea EmulatorJS.
-const CACHE = "mgs-web-v2";
+const CACHE = "mgs-web-v3";
 const SHELL = [
   "./", "index.html", "play.html", "pad.html", "test.html", "css/style.css",
   "js/console.js", "js/pad.js", "js/padui.js", "js/fetcher.js", "js/protocol.js", "js/storage.js",

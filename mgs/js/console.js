@@ -394,8 +394,9 @@ function startPeer(code) {
 }
 
 function freePlayer() {
+  // Los controles táctiles de la consola usan el jugador 1 y se ocultan en
+  // cuanto se conecta un mando, así que no reservamos plaza para ellos.
   const used = new Set([...pads.values()].map(p => p.player));
-  if (touchMode()) used.add(localPad.player);
   for (let i = 0; i < MAX_PLAYERS; i++) if (!used.has(i)) return i;
   return -1;
 }
@@ -461,6 +462,7 @@ async function autoStartFromPad() {
 }
 
 function renderPads() {
+  applyTouchMode();
   const ul = $("#pads");
   ul.innerHTML = "";
   for (const p of [...pads.values()].sort((a, b) => a.player - b.player)) {
@@ -521,6 +523,71 @@ function acceptFile(conn) {
   });
 }
 
+// ---------------------------------------------------------------- mandos en este mismo dispositivo
+// Con el Pixel conectado a la tele por cable (Android 16: la tele es un segundo
+// escritorio), la consola va en una ventana de Chrome en la tele y pad.html en
+// la pantalla del móvil. Se hablan por BroadcastChannel: sin red, sin retraso.
+
+const bc = "BroadcastChannel" in window ? new BroadcastChannel("mgs-web") : null;
+const localConns = new Map(); // padId -> conexión imitando la interfaz de PeerJS
+
+function makeLocalConn(id) {
+  const handlers = {};
+  return {
+    connectionId: "bc:" + id,
+    open: true,
+    lastSeen: Date.now(),
+    on(ev, cb) { (handlers[ev] ||= []).push(cb); },
+    emit(ev, arg) { (handlers[ev] || []).forEach(f => f(arg)); },
+    send(msg) { if (this.open) bc.postMessage({ to: id, ...msg }); },
+    close() {
+      if (!this.open) return;
+      this.open = false;
+      this.emit("close");
+    },
+  };
+}
+
+if (bc) {
+  bc.onmessage = async e => {
+    const m = e.data;
+    if (!m || !m.from || m.to) return;
+    let c = localConns.get(m.from);
+    if (m.t === "hello?") {
+      if (!c) {
+        c = makeLocalConn(m.from);
+        localConns.set(m.from, c);
+        acceptPad(c);
+        c.emit("open");
+      } else {
+        const pad = pads.get(c.connectionId);
+        c.send({ t: "hello", player: pad ? pad.player : 0, running: started, disc: currentSlot });
+      }
+      return;
+    }
+    if (!c) return;
+    c.lastSeen = Date.now();
+    if (m.t === "bye") {
+      c.close();
+      localConns.delete(m.from);
+    } else if (m.t === "file" && m.file) {
+      await storeDisc(["disc1", "disc2"].includes(m.slot) ? m.slot : "disc1", m.file);
+    } else {
+      c.emit("data", m);
+    }
+  };
+  setInterval(() => {
+    for (const [id, c] of localConns) {
+      if (Date.now() - c.lastSeen > 4000) {
+        c.close();
+        localConns.delete(id);
+      } else {
+        c.send({ t: "beat" });
+      }
+    }
+  }, 1000);
+}
+
 // ---------------------------------------------------------------- controles táctiles locales
 // Para jugar con el emulador en el propio móvil (y verlo en la tele por cable o
 // “Enviar pantalla”): la imagen queda en el centro y los botones en las franjas
@@ -536,7 +603,8 @@ function touchMode() {
 }
 
 function applyTouchMode() {
-  const on = touchMode() && !hasGamepad();
+  // Fuera si hay un mando Bluetooth o un móvil conectado como mando.
+  const on = touchMode() && !hasGamepad() && pads.size === 0;
   document.body.classList.toggle("touch", on);
   $("#optTouch").checked = touchMode();
   if (!on) {
