@@ -1,11 +1,11 @@
 // Consola: ejecuta el emulador de PS1 (EmulatorJS, núcleo PCSX-ReARMed en
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
-import * as store from "./storage.js";
-import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js";
-import { attachTouchPad, PAD_HTML } from "./padui.js";
-import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js";
-import { installAudioTap, setLocalMuted, streamTo, castPage } from "./stream.js";
+import * as store from "./storage.js?v=14";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=14";
+import { attachTouchPad, PAD_HTML } from "./padui.js?v=14";
+import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=14";
+import { installAudioTap, setLocalMuted, streamTo, castPage } from "./stream.js?v=14";
 
 // Antes de que arranque el emulador: así podemos mandar su audio a la tele.
 installAudioTap();
@@ -313,7 +313,7 @@ function showHud() {
 function updateHud() {
   $("#hudCode").textContent = peer && peer.id ? `Código ${peer.id.slice(PEER_PREFIX.length)}` : "";
   $("#hudPads").textContent = `🎮 ${pads.size}`;
-  $("#hudSave").textContent = lastSave ? `💾 ${timeAgo(lastSave)}` : "";
+  $("#hudSave").textContent = (lastSave ? `💾 ${timeAgo(lastSave)}` : "") + ` · v${window.MGS_BUILD}`;
 }
 setInterval(() => started && updateHud(), 10000);
 
@@ -809,7 +809,7 @@ $("#tvStop").onclick = stopTv;
 $("#muteLocal").onchange = e => setLocalMuted(!!tvStream && e.target.checked);
 $("#castBtn").onclick = async () => {
   const tvCode = randomCode();
-  const url = new URL("screen.html#" + tvCode, location.href).href;
+  const url = new URL(`screen.html?t=${Date.now()}#${tvCode}`, location.href).href;
   try {
     tvStatus("Elige tu tele en la lista…");
     await castPage(url, $("#castRcv").value);
@@ -836,6 +836,7 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
   }, 120000);
 })();
 
+$("#buildTag").textContent = "v" + window.MGS_BUILD;
 renderDiscs();
 startPeer(codeForPeer());
 if (localStorage.getItem("mgs.tv")) {

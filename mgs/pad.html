@@ -7,9 +7,28 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <title>Mando — MGS Web</title>
+  <script>
+    // Siempre la última versión: si la publicada no es la que se ha cargado
+    // (caché del navegador o del service worker), se recarga una vez.
+    window.MGS_BUILD = "14";
+    (function () {
+      if (MGS_BUILD.indexOf("__") === 0) return; // copia local de desarrollo
+      fetch("version.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
+        if (String(j.v) === MGS_BUILD) return;
+        var key = "mgs-reloaded-" + j.v;
+        try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, "1"); } catch (e) {}
+        var go = function () { location.reload(); };
+        if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+          navigator.serviceWorker.getRegistrations()
+            .then(function (rs) { return Promise.all(rs.map(function (r) { return r.update(); })); })
+            .then(go, go);
+        } else go();
+      }).catch(function () {});
+    })();
+  </script>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=14">
 </head>
 <body class="padpage">
   <section id="join" class="screen hidden">
@@ -87,6 +106,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
-  <script type="module" src="js/pad.js"></script>
+  <script type="module" src="js/pad.js?v=14"></script>
 </body>
 </html>

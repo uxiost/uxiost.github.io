@@ -4,8 +4,8 @@
 //    BroadcastChannel entre ventanas de Chrome. Sin red y sin retraso.
 //  - Otro dispositivo (la tele o un PC): WebRTC con PeerJS.
 
-import { PEER_PREFIX, FILE_CHUNK, formatBytes } from "./protocol.js";
-import { attachTouchPad } from "./padui.js";
+import { PEER_PREFIX, FILE_CHUNK, formatBytes } from "./protocol.js?v=14";
+import { attachTouchPad } from "./padui.js?v=14";
 
 const $ = sel => document.querySelector(sel);
 const HEARTBEAT_MS = 250;

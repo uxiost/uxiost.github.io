@@ -3,8 +3,8 @@
 // su navegador o en su Chromecast integrado mediante un receptor público que
 // carga páginas web (DashCast o URL Cast Receiver), sin registrar ninguna app.
 
-import { PEER_PREFIX } from "./protocol.js";
-import { report } from "./diag.js";
+import { PEER_PREFIX } from "./protocol.js?v=14";
+import { report } from "./diag.js?v=14";
 
 export const TV_PREFIX = PEER_PREFIX + "tv-";
 
