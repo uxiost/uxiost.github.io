@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f0b">
+  <title>Diagnóstico — MGS Web</title>
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    .checks { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+    .checks li { display: grid; grid-template-columns: 2.2em 1fr; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .checks .st { font-size: 1.2rem; }
+    .checks b { display: block; }
+    .verdict { font-size: 1.15rem; padding: 14px 16px; border-radius: 12px; border: 2px solid var(--accent); margin: 16px 0; }
+    .verdict.bad { border-color: var(--danger); }
+    #pads { font-family: ui-monospace, monospace; font-size: .85rem; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <main class="screen">
+    <header class="brand">
+      <h1>DIAGNÓSTICO <span>TV</span></h1>
+      <p class="muted">Abre esta página en el navegador de la tele (o donde quieras jugar). Comprueba si puede mover el emulador y conectarse con el móvil.</p>
+    </header>
+    <div id="verdict" class="verdict">Comprobando…</div>
+    <ul id="checks" class="checks"></ul>
+    <div class="card" style="margin-top:16px">
+      <h2>Mando Bluetooth</h2>
+      <p class="muted small">Si tienes un mando PS4/Xbox emparejado con este dispositivo, pulsa cualquier botón.</p>
+      <div id="pads">Ningún mando detectado todavía.</div>
+    </div>
+    <p class="muted small" id="ua"></p>
+  </main>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+  <script type="module">
+    const list = document.getElementById("checks");
+    const results = [];
+    function row(name, fn) {
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="st">⏳</span><span><b>${name}</b><span class="muted small">…</span></span>`;
+      list.appendChild(li);
+      const p = (async () => {
+        let r;
+        try { r = await fn(); } catch (e) { r = { ok: false, msg: e.message || String(e) }; }
+        li.querySelector(".st").textContent = r.ok === true ? "✅" : r.ok === "warn" ? "⚠️" : "❌";
+        li.querySelector(".muted").textContent = r.msg;
+        results.push({ name, ...r });
+        return r;
+      })();
+      return p;
+    }
+
+    document.getElementById("ua").textContent = navigator.userAgent;
+
+    const checks = [
+      row("WebAssembly (necesario)", async () => {
+        if (typeof WebAssembly !== "object") return { ok: false, msg: "No disponible: el emulador no puede funcionar aquí." };
+        const simd = WebAssembly.validate(new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11]));
+        return { ok: true, msg: `Disponible${simd ? " (con SIMD)" : ""}.` };
+      }),
+      row("WebGL (necesario)", async () => {
+        const c = document.createElement("canvas");
+        const gl2 = c.getContext("webgl2");
+        const gl = gl2 || c.getContext("webgl");
+        if (!gl) return { ok: false, msg: "No disponible." };
+        const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+        const gpu = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : "GPU desconocida";
+        return { ok: true, msg: `${gl2 ? "WebGL 2" : "WebGL 1"} · ${gpu}` };
+      }),
+      row("Potencia del procesador", async () => {
+        // Bucle de enteros parecido al trabajo de un intérprete; referencia: un móvil de gama media hace ~1x.
+        await new Promise(r => setTimeout(r, 50));
+        const t0 = performance.now();
+        let x = 1, acc = 0;
+        for (let i = 0; i < 30_000_000; i++) { x = (x * 1103515245 + 12345) | 0; acc ^= x >>> 7; }
+        const ms = performance.now() - t0;
+        const score = 120 / ms; // ~120 ms en un móvil de gama media de 2023
+        window.__bench = acc; // evita que el bucle se optimice
+        const msg = `${ms.toFixed(0)} ms · ${score.toFixed(2)}x un móvil de gama media`;
+        return { ok: score >= 0.6 ? true : score >= 0.35 ? "warn" : false, msg: score >= 0.6 ? msg : score >= 0.35 ? msg + " · puede ir justo" : msg + " · probablemente irá lento", score };
+      }),
+      row("Audio", async () => {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        return AC ? { ok: true, msg: "Web Audio disponible." } : { ok: false, msg: "Sin Web Audio." };
+      }),
+      row("Almacenamiento para el disco", async () => {
+        if (!window.indexedDB) return { ok: false, msg: "Sin IndexedDB: no se pueden guardar discos ni partidas." };
+        const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null;
+        if (!est) return { ok: "warn", msg: "IndexedDB disponible, cuota desconocida." };
+        const free = (est.quota - est.usage) / 1024 / 1024;
+        return { ok: free > 900 ? true : free > 450 ? "warn" : false, msg: `${free.toFixed(0)} MB libres para la web${free > 900 ? "" : free > 450 ? " (cabe un .chd, no un .bin)" : " (no cabe el juego)"}` };
+      }),
+      row("WebRTC (para usar el móvil como mando)", async () => {
+        if (!window.RTCPeerConnection) return { ok: false, msg: "No disponible: el móvil no podrá hacer de mando con esta tele." };
+        // Prueba real: dos conexiones locales con un canal de datos.
+        const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+        a.onicecandidate = e => e.candidate && b.addIceCandidate(e.candidate);
+        b.onicecandidate = e => e.candidate && a.addIceCandidate(e.candidate);
+        const ch = a.createDataChannel("t");
+        const got = new Promise((res, rej) => {
+          b.ondatachannel = e => { e.channel.onmessage = m => res(m.data); };
+          setTimeout(() => rej(new Error("El canal de datos no se abrió en 8 s.")), 8000);
+        });
+        ch.onopen = () => ch.send("ping");
+        await a.setLocalDescription(await a.createOffer());
+        await b.setRemoteDescription(a.localDescription);
+        await b.setLocalDescription(await b.createAnswer());
+        await a.setRemoteDescription(b.localDescription);
+        const d = await got;
+        a.close(); b.close();
+        return { ok: d === "ping", msg: "El canal de datos funciona." };
+      }),
+      row("Servidor de emparejamiento (PeerJS)", async () => {
+        if (!window.Peer) return { ok: false, msg: "No cargó la librería PeerJS." };
+        const p = new Peer({ debug: 0 });
+        const id = await new Promise((res, rej) => {
+          p.on("open", res);
+          p.on("error", e => rej(new Error(e.type)));
+          setTimeout(() => rej(new Error("Sin respuesta en 10 s.")), 10000);
+        });
+        p.destroy();
+        return { ok: true, msg: `Conectado (id ${id.slice(0, 6)}…).` };
+      }),
+      row("Descargas desde archive.org", async () => {
+        const r = await fetch("https://cors.archive.org/cors/nasa/__ia_thumb.jpg", { cache: "no-store" });
+        return { ok: r.ok, msg: r.ok ? "Se puede descargar desde un enlace." : `Respuesta ${r.status}.` };
+      }),
+      row("Mandos (Gamepad API)", async () => {
+        if (!navigator.getGamepads) return { ok: false, msg: "Este navegador no lee mandos." };
+        return { ok: true, msg: "Disponible. Pulsa un botón del mando para probarlo (abajo)." };
+      }),
+    ];
+
+    Promise.all(checks).then(() => {
+      const get = n => results.find(r => r.name.startsWith(n)) || {};
+      const v = document.getElementById("verdict");
+      const canRun = get("WebAssembly").ok === true && get("WebGL").ok === true;
+      const fast = (get("Potencia").score || 0) >= 0.6;
+      const rtc = get("WebRTC").ok === true && get("Servidor").ok === true;
+      if (!canRun) {
+        v.classList.add("bad");
+        v.textContent = "Este navegador no puede ejecutar el emulador. Juega en el móvil y envía la imagen a la tele (cable USB-C → HDMI o “Enviar pantalla”).";
+      } else if (fast && rtc) {
+        v.textContent = "✅ Esta pantalla puede ser la consola: abre play.html aquí y usa el móvil como mando.";
+      } else if (!rtc) {
+        v.classList.add("bad");
+        v.textContent = `Puede ejecutar el emulador${fast ? "" : " (justo de potencia)"}, pero el móvil no podrá hacer de mando aquí. Usa un mando Bluetooth con la tele o juega en el móvil y envía la imagen.`;
+      } else {
+        v.classList.add("bad");
+        v.textContent = "Funciona todo, pero el procesador es lento: probablemente irá a tirones. Mejor que el juego corra en el móvil y envíes la imagen a la tele.";
+      }
+    });
+
+    // Mandos en vivo
+    function pollPads() {
+      const pads = [...(navigator.getGamepads ? navigator.getGamepads() : [])].filter(Boolean);
+      if (pads.length) {
+        document.getElementById("pads").textContent = pads.map(p =>
+          `${p.id}\n  mapeo: ${p.mapping || "no estándar"} · botones pulsados: ${p.buttons.map((b, i) => b.pressed ? i : null).filter(i => i !== null).join(", ") || "ninguno"}`
+        ).join("\n");
+      }
+      requestAnimationFrame(pollPads);
+    }
+    pollPads();
+  </script>
+</body>
+</html>

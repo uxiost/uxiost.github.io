@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f0b">
+  <title>Consola — MGS Web</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="console">
+  <div id="stage">
+    <div id="lctl" class="side left">
+      <div class="row sh-row"><div class="btn-pad sh" data-btn="l2">L2</div><div class="btn-pad sh" data-btn="l1">L1</div></div>
+      <div class="slot-dpad"></div>
+      <div class="btn-pad small-btn" data-btn="select">SELECT</div>
+    </div>
+    <div id="game"></div>
+    <div id="rctl" class="side right">
+      <div class="row sh-row"><div class="btn-pad sh" data-btn="r1">R1</div><div class="btn-pad sh" data-btn="r2">R2</div></div>
+      <div class="slot-face"></div>
+      <div class="btn-pad small-btn" data-btn="start">START</div>
+    </div>
+  </div>
+
+  <section id="setup" class="screen">
+    <header class="brand">
+      <h1>TACTICAL ESPIONAGE <span>WEB</span></h1>
+      <p class="muted">Consola. Ábrela en la tele (o en el móvil) y escanea el QR con el móvil para usarlo como mando.</p>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Discos</h2>
+        <p class="muted small">Usa tu propia copia de <b>Metal Gear Solid</b> (PS1) en .chd, .pbp, .cue/.bin dentro de un .zip, o .iso.
+          El archivo se guarda solo en este navegador.</p>
+        <div id="discs"></div>
+        <p class="muted small" id="quota"></p>
+      </div>
+
+      <div class="card" id="link">
+        <h2>Descargar desde un enlace</h2>
+        <p class="muted small">Pega un enlace de archive.org (página <i>details</i> o <i>download</i>) o una URL directa a tu archivo. Se descarga una vez y queda guardado.</p>
+        <form id="linkForm" class="row">
+          <input id="linkUrl" type="url" inputmode="url" placeholder="https://archive.org/details/…" required>
+          <select id="linkSlot" aria-label="Disco de destino"><option value="auto">Disco: auto</option><option value="disc1">Disco 1</option><option value="disc2">Disco 2</option></select>
+          <button class="primary" id="linkGo">Descargar</button>
+        </form>
+        <ul id="linkOpts" class="list"></ul>
+        <progress id="linkProg" max="1" value="0" hidden></progress>
+        <p id="linkText" class="muted small"></p>
+        <p class="muted small">Consejo: guarda en favoritos la dirección que aparece al terminar (<i>play.html?src=…</i>) y la próxima vez arrancará directamente.</p>
+      </div>
+
+      <div class="card" id="pair">
+        <h2>Mando: tu móvil</h2>
+        <div id="qr" class="qr" aria-label="Código QR para emparejar el mando"></div>
+        <p>Código: <b id="code" class="code">…</b></p>
+        <p class="muted small break" id="padUrl"></p>
+        <ul id="pads" class="pads"></ul>
+        <p class="muted small">También funcionan mandos PS4/PS5/Xbox por Bluetooth conectados a este dispositivo, y el teclado (flechas, Z, X, A, S, Enter).</p>
+      </div>
+    </div>
+
+    <details class="card">
+      <summary>¿Cómo lo veo en la tele?</summary>
+      <ol class="small">
+        <li><b>Mejor opción:</b> abre esta misma página en el navegador de la tele / Fire TV / PC conectado por HDMI y escanea el QR con el móvil. El juego corre en la tele y el móvil es solo mando (menos retraso).</li>
+        <li>¿La tele no puede elegir archivos? Pulsa <b>“Enviar disco”</b> en el mando del móvil: el móvil le pasa el disco a la tele por la red local.</li>
+        <li><b>Alternativa:</b> juega en el móvil y duplica la pantalla: Android → ajustes rápidos → <i>Enviar / Smart View</i>; iPhone → <i>Duplicar pantalla</i> (AirPlay). En PC Chrome: ⋮ → <i>Enviar…</i>.</li>
+      </ol>
+    </details>
+  </section>
+
+  <div id="hud" class="hud hidden">
+    <span id="hudCode"></span>
+    <span id="hudPads"></span>
+    <span id="hudSave"></span>
+    <button id="hudMenu" class="chip">☰</button>
+  </div>
+
+  <dialog id="menu">
+    <h2>Partida</h2>
+    <div class="row">
+      <button data-act="save">Guardar ahora</button>
+      <button data-act="load">Cargar último</button>
+      <button data-act="reset">Reiniciar consola</button>
+      <button data-act="export">Exportar copia</button>
+      <label class="btn">Importar<input type="file" id="importState" accept=".state,.json,application/octet-stream" hidden></label>
+    </div>
+    <h3>Puntos guardados</h3>
+    <ul id="stateList" class="list"></ul>
+    <h3>Autoguardado</h3>
+    <label>Cada <select id="interval">
+      <option value="30">30 s</option>
+      <option value="60">1 min</option>
+      <option value="120">2 min</option>
+      <option value="300">5 min</option>
+      <option value="0">Desactivado</option>
+    </select></label>
+    <h3>Pantalla</h3>
+    <div class="row">
+      <label><input type="checkbox" id="optTouch"> Controles táctiles a los lados</label>
+    </div>
+    <h3>Disco</h3>
+    <div class="row">
+      <button data-act="disc1">Disco 1</button>
+      <button data-act="disc2">Disco 2</button>
+    </div>
+    <p class="muted small">Al cambiar de disco se recarga el emulador. Guarda en la Memory Card cuando el juego lo pida: la Memory Card es la misma para los dos discos.</p>
+    <form method="dialog"><button class="primary">Cerrar</button></form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+  <script type="module" src="js/console.js"></script>
+</body>
+</html>

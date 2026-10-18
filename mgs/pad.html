@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f0b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Mando — MGS Web</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="padpage">
+  <section id="join" class="screen hidden">
+    <header class="brand">
+      <h1>MANDO <span>WEB</span></h1>
+      <p class="muted">Escanea el QR de la tele con la cámara, o escribe el código que aparece en ella.</p>
+    </header>
+    <form id="joinForm" class="card row">
+      <input id="joinCode" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="código (ej. k7m2p)" maxlength="12" required>
+      <button class="primary">Conectar</button>
+    </form>
+  </section>
+
+  <main id="pad" class="pad hidden" aria-label="Mando">
+    <div class="shoulders left">
+      <div class="btn-pad sh" data-btn="l2">L2</div>
+      <div class="btn-pad sh" data-btn="l1">L1</div>
+    </div>
+    <div class="shoulders right">
+      <div class="btn-pad sh" data-btn="r1">R1</div>
+      <div class="btn-pad sh" data-btn="r2">R2</div>
+    </div>
+
+    <div id="dpad" class="dpad" aria-label="Cruceta">
+      <span class="arr up">▲</span><span class="arr down">▼</span><span class="arr left">◀</span><span class="arr right">▶</span>
+    </div>
+
+    <div class="center">
+      <div id="status" class="status">Conectando…</div>
+      <div class="row">
+        <div class="btn-pad small-btn" data-btn="select">SELECT</div>
+        <div class="btn-pad small-btn" data-btn="start">START</div>
+      </div>
+      <button id="menuBtn" class="chip">☰ Menú</button>
+    </div>
+
+    <div class="face" aria-label="Botones">
+      <div class="btn-pad fb tri" data-btn="triangle">△</div>
+      <div class="btn-pad fb cir" data-btn="circle">○</div>
+      <div class="btn-pad fb crs" data-btn="cross">✕</div>
+      <div class="btn-pad fb sqr" data-btn="square">□</div>
+    </div>
+  </main>
+
+  <dialog id="padMenu">
+    <h2>Menú</h2>
+    <div class="row">
+      <button data-cmd="save" class="primary">Guardar ahora</button>
+      <button data-cmd="load">Cargar último</button>
+      <button data-cmd="pause">Pausa</button>
+      <button data-cmd="menu">Guardados (tele)</button>
+    </div>
+    <h3>Disco</h3>
+    <div class="row">
+      <button data-cmd="disc1">Jugar disco 1</button>
+      <button data-cmd="disc2">Jugar disco 2</button>
+    </div>
+    <h3>Enviar disco a la tele</h3>
+    <p class="muted small">Pasa tu copia (.chd recomendado) desde el móvil a la consola por la red local.</p>
+    <div class="row">
+      <select id="sendSlot"><option value="disc1">Disco 1</option><option value="disc2">Disco 2</option></select>
+      <label class="btn">Elegir y enviar<input type="file" id="sendFile" hidden></label>
+    </div>
+    <progress id="sendProg" max="1" value="0" hidden></progress>
+    <p id="sendText" class="muted small"></p>
+    <h3>Opciones</h3>
+    <div class="row">
+      <label><input type="checkbox" id="optVibe" checked> Vibración</label>
+      <button id="fsBtn">Pantalla completa</button>
+      <button id="changeCode">Cambiar código</button>
+    </div>
+    <form method="dialog"><button class="primary">Volver al mando</button></form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+  <script type="module" src="js/pad.js"></script>
+</body>
+</html>

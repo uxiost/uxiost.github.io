@@ -1,0 +1,13 @@
+{
+  "name": "MGS Web",
+  "short_name": "MGS Web",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "any",
+  "background_color": "#0b0f0b",
+  "theme_color": "#0b0f0b",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

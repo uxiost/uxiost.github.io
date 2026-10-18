@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f0b">
+  <title>MGS Web</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <main class="screen">
+    <header class="brand">
+      <h1>TACTICAL ESPIONAGE <span>WEB</span></h1>
+      <p class="muted">Metal Gear Solid (PS1) en el navegador, sin instalar nada. Tu móvil como mando, la tele como pantalla y guardado automático.</p>
+    </header>
+
+    <div class="choices">
+      <a class="card choice" href="play.html">
+        <div class="big">📺</div>
+        <h2>Esto es la consola</h2>
+        <p class="muted">Ábrelo en la tele, el PC conectado a la tele o el propio móvil. Aquí corre el juego.</p>
+      </a>
+      <a class="card choice" href="pad.html">
+        <div class="big">🎮</div>
+        <h2>Esto es el mando</h2>
+        <p class="muted">Ábrelo en el móvil (o escanea el QR de la consola) para jugar con la pantalla táctil.</p>
+      </a>
+    </div>
+
+    <p><a class="btn" href="test.html">🩺 Diagnóstico: ¿puede mi tele ser la consola?</a></p>
+
+    <details class="card">
+      <summary>Qué necesitas</summary>
+      <ul class="small">
+        <li>Tu propia copia de Metal Gear Solid de PS1 volcada a archivo (.chd recomendado; también .pbp, .zip con .cue/.bin, .iso). El juego no viene incluido: cargas tu archivo o pegas un enlace a tu copia.</li>
+        <li>Consola y móvil con internet (solo para emparejar; el mando va directo por la red local vía WebRTC).</li>
+        <li>Mando PS4/PS5/Xbox por Bluetooth: conéctalo al dispositivo que hace de consola y pulsa un botón.</li>
+      </ul>
+    </details>
+  </main>
+  <script>
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+  </script>
+</body>
+</html>
