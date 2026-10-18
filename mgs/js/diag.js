@@ -64,6 +64,7 @@ async function loop(video) {
   b.onicecandidate = e => { if (e.candidate) { cands.b.push(kind(e.candidate)); a.addIceCandidate(e.candidate).catch(err => remember("loop addIce", err)); } };
   let done;
   const ok = new Promise((res, rej) => { done = res; setTimeout(() => rej(new Error("timeout 8s")), 8000); });
+  ok.catch(() => {}); // si falla antes, que el temporizador no deje un error suelto
   if (video) {
     const c = document.createElement("canvas");
     c.width = 320; c.height = 240;

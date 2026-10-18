@@ -77,11 +77,6 @@
         report("tv", "peer-error", { code, type: e.type, msg: String(e.message || e) });
         if (e.type === "unavailable-id") { peer.destroy(); setTimeout(start, 3000); }
       });
-      // Avisos del móvil ("pulsa Jugar", "recibiendo…").
-      peer.on("connection", c => {
-        if (!(c.metadata && c.metadata.status)) return c.close();
-        c.on("data", m => { if (m && m.t === "status" && m.msg) $("#state").textContent = m.msg; });
-      });
       peer.on("call", call => {
         call.answer();
         report("tv", "call", { code });
@@ -90,18 +85,38 @@
         call.on("stream", s => show(s, call));
         call.on("close", () => { $("#wait").hidden = false; $("#state").textContent = "El móvil se ha desconectado. Esperando…"; });
         // Canal de vuelta: el mando de la tele llega al móvil como un mando más.
+        // (El Chromecast de las LG no tiene canales de datos: ahí no hay canal de vuelta
+        // y se juega con el móvil o con un mando emparejado al móvil.)
         const consoleId = call.metadata && call.metadata.console;
-        if (consoleId && (!ctrl || !ctrl.open)) connectCtrl(consoleId);
+        dataChannelsWork.then(ok => {
+          if (ok && consoleId && (!ctrl || !ctrl.open)) connectCtrl(consoleId);
+        });
       });
     }
 
+    const dataChannelsWork = (async () => {
+      try {
+        const pc = new RTCPeerConnection();
+        pc.createDataChannel("t");
+        await pc.setLocalDescription(await pc.createOffer());
+        pc.close();
+        return true;
+      } catch (e) {
+        return false;
+      }
+    })();
+
+    let statsSent = false;
     function show(stream, call) {
-      video.srcObject = stream;
+      // "stream" llega una vez por pista (audio y vídeo): no recargar si es el mismo.
+      if (video.srcObject !== stream) video.srcObject = stream;
       lowLatencyReceivers(call.peerConnection);
       $("#wait").hidden = true;
       video.muted = false;
-      video.play().catch(() => {
+      video.play().catch(err => {
+        if (err && err.name === "AbortError") return; // otra carga en curso; no es un bloqueo
         // Sin interacción previa algunas teles no dejan sonar el audio.
+        report("tv", "autoplay-blocked", { code, err: String(err) });
         video.muted = true;
         video.play().catch(() => {});
         $("#sound").hidden = false;
@@ -165,6 +180,10 @@
           const fps = r.framesPerSecond ? Math.round(r.framesPerSecond) : "?";
           const jb = r.jitterBufferEmittedCount ? Math.round(1000 * r.jitterBufferDelay / r.jitterBufferEmittedCount) : "?";
           $("#stat").textContent = `${r.frameWidth || "?"}×${r.frameHeight || "?"} · ${fps} fps · búfer ${jb} ms · ${r.decoderImplementation || ""}`;
+          if (!statsSent && r.framesDecoded > 300) {
+            statsSent = true;
+            report("tv", "stats", { code, w: r.frameWidth, h: r.frameHeight, fps, jb, dropped: r.framesDropped, decoded: r.framesDecoded, dec: r.decoderImplementation, codec: r.codecId });
+          }
         }
       });
     }, 2000);

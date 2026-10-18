@@ -82,75 +82,169 @@ export function lowLatencyReceivers(pc) {
   }
 }
 
-async function tuneSenders(pc, canvas) {
-  for (const s of pc.getSenders()) {
-    if (!s.track || s.track.kind !== "video") continue;
-    const p = s.getParameters();
-    p.degradationPreference = "maintain-framerate";
-    p.encodings = p.encodings && p.encodings.length ? p.encodings : [{}];
-    p.encodings[0].maxBitrate = 6_000_000;
-    p.encodings[0].maxFramerate = 60;
-    // Hasta 720 líneas: suficiente para PS1 (240–480 de origen) y ligero para la wifi.
-    p.encodings[0].scaleResolutionDownBy = Math.max(1, canvas.height / 720);
-    try { await s.setParameters(p); } catch (e) { console.warn("setParameters", e); }
+// La tele del Chromecast decodifica VP8 por software y va justa de CPU:
+// 480 líneas y 30 fps sobran para PS1 (240–480 de origen).
+const MAX_LINES = 480;
+const FPS = 30;
+
+async function tuneVideoSender(sender, height) {
+  const p = sender.getParameters();
+  p.degradationPreference = "maintain-framerate";
+  p.encodings = p.encodings && p.encodings.length ? p.encodings : [{}];
+  p.encodings[0].maxBitrate = 2_500_000;
+  p.encodings[0].maxFramerate = FPS;
+  p.encodings[0].scaleResolutionDownBy = Math.max(1, (height || MAX_LINES) / MAX_LINES);
+  try { await sender.setParameters(p); } catch (e) { console.warn("setParameters", e); }
+}
+
+// Pantalla de estado que se manda como vídeo mientras el juego no ha empezado:
+// así la tele enseña qué pasa en el móvil sin necesitar un canal de datos.
+function statusCard() {
+  const c = document.createElement("canvas");
+  c.width = 640;
+  c.height = 480;
+  const g = c.getContext("2d");
+  let text = "";
+  let tick = 0;
+  const draw = () => {
+    g.fillStyle = "#0b0f0b";
+    g.fillRect(0, 0, 640, 480);
+    g.textAlign = "center";
+    g.fillStyle = "#7fbf6a";
+    g.font = "bold 34px system-ui, sans-serif";
+    g.fillText("MGS WEB", 320, 150);
+    g.fillStyle = "#d7e4d2";
+    g.font = "26px system-ui, sans-serif";
+    const words = text.split(" ");
+    let line = "", y = 240;
+    for (const w of words) {
+      if (g.measureText(line + w).width > 560) { g.fillText(line, 320, y); line = ""; y += 36; }
+      line += w + " ";
+    }
+    g.fillText(line, 320, y);
+    g.fillStyle = "#8ea38a";
+    g.fillText(".".repeat(1 + (tick++ % 3)), 320, y + 50);
+  };
+  draw();
+  // captureStream solo emite cuando se dibuja: redibujamos a menudo.
+  const iv = setInterval(draw, 400);
+  const track = c.captureStream(5).getVideoTracks()[0];
+  return { track, set(t) { text = t; draw(); }, stop() { clearInterval(iv); track.stop(); } };
+}
+
+function silentAudioTrack() {
+  try {
+    const ctx = new AudioContext();
+    const dest = ctx.createMediaStreamDestination();
+    const g = ctx.createGain();
+    g.gain.value = 0;
+    const o = ctx.createOscillator();
+    o.connect(g);
+    g.connect(dest);
+    o.start();
+    return dest.stream.getAudioTracks()[0];
+  } catch (e) {
+    return null;
+  }
+}
+
+// PeerJS añade un canal de datos a toda llamada de vídeo (para avisar del
+// cierre), y el Chromecast de las LG tiene los canales de datos desactivados:
+// rechaza la oferta entera. Llamamos sin él; el cierre lo vigilamos nosotros.
+function callWithoutDataChannel(peer, id, stream, options) {
+  const proto = RTCPeerConnection.prototype;
+  const original = proto.createDataChannel;
+  proto.createDataChannel = function () {
+    return { readyState: "closed", close() {}, label: "" };
+  };
+  try {
+    return peer.call(id, stream, options);
+  } finally {
+    proto.createDataChannel = original;
   }
 }
 
 // ---------------------------------------------------------------- llamada a la tele
 
 // Llama a la pantalla de la tele y la mantiene: si se cae o aún no está
-// lista (el Chromecast tarda unos segundos en abrirla), reintenta.
+// lista (el Chromecast tarda unos segundos en abrirla), reintenta. Antes de
+// que arranque el juego manda una pantalla de estado y, cuando arranca,
+// cambia la imagen y el sonido por los del juego sin cortar la conexión.
 export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
   let call = null;
   let stopped = false;
   let timer = null;
+  let upgrade = null;
   const started = Date.now();
 
-  // Canal de avisos: la tele enseña en pantalla qué está pasando en el móvil
-  // (y si llega, sabemos que la conexión entre los dos funciona).
-  let statusConn = null;
-  let lastTvMsg = "";
-  const tell = msg => {
-    lastTvMsg = msg;
-    if (statusConn && statusConn.open) statusConn.send({ t: "status", msg });
+  const card = statusCard();
+  const silent = silentAudioTrack();
+  let gameVideo = null;
+  let gameAudio = null;
+  let gameHeight = 0;
+
+  let lastSaid = "";
+  const say = (msg, ok, tvMsg) => {
+    if (msg === lastSaid) return;
+    lastSaid = msg;
+    onStatus(msg, ok);
+    card.set(tvMsg || msg);
   };
-  const openStatus = () => {
-    if (stopped || (statusConn && statusConn.open)) return;
-    statusConn = peer.connect(TV_PREFIX + tvCode, { serialization: "json", metadata: { status: true } });
-    statusConn.on("open", () => statusConn.send({ t: "status", msg: lastTvMsg }));
+
+  const currentTracks = () => {
+    const canvas = getCanvas();
+    if (canvas && !gameVideo) {
+      gameVideo = canvas.captureStream(FPS).getVideoTracks()[0];
+      gameVideo.contentHint = "motion";
+      gameHeight = canvas.height;
+    }
+    if (!gameAudio) gameAudio = audioTracks()[0] || null;
+    return { video: gameVideo || card.track, audio: gameAudio || silent };
   };
-  const say = (msg, ok, tvMsg) => { onStatus(msg, ok); tell(tvMsg || msg); };
+
+  // Cambia en caliente la pantalla de estado por el juego cuando esté listo.
+  const upgradeTracks = async () => {
+    const pc = call && call.peerConnection;
+    if (!pc || pc.connectionState !== "connected") return;
+    const { video, audio } = currentTracks();
+    for (const sender of pc.getSenders()) {
+      const want = sender.track && sender.track.kind === "video" ? video : sender.track && sender.track.kind === "audio" ? audio : null;
+      if (want && sender.track !== want) {
+        await sender.replaceTrack(want).catch(e => report("phone", "replaceTrack", { msg: String(e) }));
+        if (want === gameVideo) {
+          tuneVideoSender(sender, gameHeight);
+          say("En la tele ✓", true, "¡A jugar!");
+          report("phone", "game-on-tv", { tv: tvCode, h: gameHeight });
+        }
+      }
+    }
+    if (!gameVideo) say("Tele conectada ✓ Ahora pulsa ▶ Jugar en un disco (o carga uno).", true, "Móvil conectado ✓ · Pulsa ▶ Jugar en el móvil");
+  };
 
   const attempt = () => {
     if (stopped) return;
-    openStatus();
-    const canvas = getCanvas();
-    if (!canvas) {
-      say("Tele lista. Ahora pulsa ▶ Jugar en un disco (o carga uno).", false,
-        "Móvil conectado ✓ · Ahora pulsa ▶ Jugar en el móvil");
-      timer = setTimeout(attempt, 1500);
-      return;
-    }
-    const stream = canvas.captureStream(60);
-    stream.getVideoTracks().forEach(t => { t.contentHint = "motion"; });
-    audioTracks().forEach(t => stream.addTrack(t));
-    say("Conectando con la tele…", false, "Recibiendo el juego…");
-    const c = peer.call(TV_PREFIX + tvCode, stream, {
+    const { video, audio } = currentTracks();
+    const stream = new MediaStream([video, audio].filter(Boolean));
+    say("Conectando con la tele…", false, "Conectando…");
+    const c = callWithoutDataChannel(peer, TV_PREFIX + tvCode, stream, {
       metadata: { console: consoleId },
       sdpTransform: preferH264,
     });
     call = c;
-    let connected = false;
     const pcWatch = setInterval(() => {
       if (c !== call) return clearInterval(pcWatch);
       const pc = c.peerConnection;
       if (!pc) return;
       const st = pc.connectionState || pc.iceConnectionState;
-      if (st !== c.__lastSt) { c.__lastSt = st; report("phone", "pc-state", { tv: tvCode, st }); }
-      if (st === "connected" && !connected) {
-        connected = true;
-        tuneSenders(pc, canvas);
-        say("En la tele ✓", true);
+      if (st !== c.__lastSt) {
+        c.__lastSt = st;
+        report("phone", "pc-state", { tv: tvCode, st });
+        if (st === "connected") {
+          const vs = pc.getSenders().find(x => x.track && x.track.kind === "video");
+          if (vs) tuneVideoSender(vs, video === gameVideo ? gameHeight : MAX_LINES);
+          if (video === gameVideo) say("En la tele ✓", true, "¡A jugar!");
+          upgradeTracks();
+        }
       }
       if (["failed", "closed", "disconnected"].includes(st)) {
         clearInterval(pcWatch);
@@ -184,16 +278,18 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
   };
   peer.on("error", onPeerError);
 
+  upgrade = setInterval(upgradeTracks, 1000);
   attempt();
   return {
     stop() {
       stopped = true;
       clearTimeout(timer);
+      clearInterval(upgrade);
       peer.off("error", onPeerError);
       const old = call;
       call = null;
       try { old && old.close(); } catch (e) { /* ya cerrada */ }
-      try { statusConn && statusConn.close(); } catch (e) { /* ya cerrada */ }
+      card.stop();
     },
   };
 }
