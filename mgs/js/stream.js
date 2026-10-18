@@ -44,6 +44,25 @@ function tapFor(ctx, connect) {
   return t;
 }
 
+// Chrome puede dejar el audio del emulador en pausa si no hubo un toque reciente:
+// entonces a la tele solo llega silencio. Lo reactivamos siempre que se pueda.
+export function resumeAudio() {
+  for (const ctx of taps.keys()) {
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  }
+}
+["pointerdown", "keydown", "touchstart"].forEach(ev =>
+  window.addEventListener(ev, resumeAudio, { capture: true, passive: true }));
+setInterval(resumeAudio, 2000);
+
+export function audioInfo() {
+  const out = [];
+  for (const [ctx, { tap }] of taps) {
+    out.push({ state: ctx.state, rate: ctx.sampleRate, tracks: tap.stream.getAudioTracks().length });
+  }
+  return out;
+}
+
 export function setLocalMuted(muted) {
   localMuted = muted;
   for (const { local } of taps.values()) local.gain.value = muted ? 0 : 1;
@@ -75,6 +94,23 @@ export function preferH264(sdp) {
   return lines.join("\r\n");
 }
 
+// Que el vídeo empiece nítido: por defecto WebRTC arranca a ~300 kbps y sube poco a poco.
+export function boostBitrate(sdp) {
+  const lines = sdp.split("\r\n");
+  const vp8 = lines.filter(l => /^a=rtpmap:\d+ (VP8|H264)\/90000/i.test(l)).map(l => l.match(/^a=rtpmap:(\d+)/)[1]);
+  const extra = "x-google-start-bitrate=2000;x-google-min-bitrate=800;x-google-max-bitrate=3500";
+  for (const pt of vp8) {
+    const i = lines.findIndex(l => l.startsWith(`a=fmtp:${pt} `));
+    if (i >= 0) {
+      if (!lines[i].includes("x-google-start-bitrate")) lines[i] += ";" + extra;
+    } else {
+      const r = lines.findIndex(l => l.startsWith(`a=rtpmap:${pt} `));
+      lines.splice(r + 1, 0, `a=fmtp:${pt} ${extra}`);
+    }
+  }
+  return lines.join("\r\n");
+}
+
 export function lowLatencyReceivers(pc) {
   for (const r of pc.getReceivers()) {
     try { r.playoutDelayHint = 0; } catch (e) { /* no soportado */ }
@@ -87,11 +123,37 @@ export function lowLatencyReceivers(pc) {
 const MAX_LINES = 480;
 const FPS = 30;
 
+// Copiamos solo la imagen del juego (4:3, sin las bandas negras del lienzo del
+// emulador) a un lienzo fijo de 640×480. Así la resolución en la tele no depende
+// de cómo sujetes el móvil.
+const OUT_W = 640, OUT_H = 480;
+function gameFeed(src) {
+  const out = document.createElement("canvas");
+  out.width = OUT_W;
+  out.height = OUT_H;
+  const g = out.getContext("2d", { alpha: false });
+  g.imageSmoothingQuality = "high";
+  const copy = () => {
+    const w = src.width, h = src.height;
+    if (!w || !h) return;
+    let sw = w, sh = h;
+    if (w / h > 4 / 3) sw = h * 4 / 3; else sh = w * 3 / 4;
+    g.drawImage(src, (w - sw) / 2, (h - sh) / 2, sw, sh, 0, 0, OUT_W, OUT_H);
+  };
+  let raf = 0;
+  const loop = () => { copy(); raf = requestAnimationFrame(loop); };
+  loop();
+  const track = out.captureStream(FPS).getVideoTracks()[0];
+  track.contentHint = "motion";
+  return { track, stop() { cancelAnimationFrame(raf); track.stop(); } };
+}
+
 async function tuneVideoSender(sender, height) {
   const p = sender.getParameters();
-  p.degradationPreference = "maintain-framerate";
+  // Resolución fija y baja (640×480): mejor bajar fps que emborronar la imagen.
+  p.degradationPreference = "maintain-resolution";
   p.encodings = p.encodings && p.encodings.length ? p.encodings : [{}];
-  p.encodings[0].maxBitrate = 2_500_000;
+  p.encodings[0].maxBitrate = 3_500_000;
   p.encodings[0].maxFramerate = FPS;
   p.encodings[0].scaleResolutionDownBy = Math.max(1, (height || MAX_LINES) / MAX_LINES);
   try { await sender.setParameters(p); } catch (e) { console.warn("setParameters", e); }
@@ -148,6 +210,11 @@ function silentAudioTrack() {
   }
 }
 
+function audioSenderTrack(pc) {
+  const s = pc && pc.getSenders().find(x => x.track && x.track.kind === "audio");
+  return s ? { label: s.track.label.slice(0, 40), state: s.track.readyState, muted: s.track.muted } : null;
+}
+
 // PeerJS añade un canal de datos a toda llamada de vídeo (para avisar del
 // cierre), y el Chromecast de las LG tiene los canales de datos desactivados:
 // rechaza la oferta entera. Llamamos sin él; el cierre lo vigilamos nosotros.
@@ -179,6 +246,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
 
   const card = statusCard();
   const silent = silentAudioTrack();
+  let feed = null;
   let gameVideo = null;
   let gameAudio = null;
   let gameHeight = 0;
@@ -194,9 +262,9 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
   const currentTracks = () => {
     const canvas = getCanvas();
     if (canvas && !gameVideo) {
-      gameVideo = canvas.captureStream(FPS).getVideoTracks()[0];
-      gameVideo.contentHint = "motion";
-      gameHeight = canvas.height;
+      feed = gameFeed(canvas);
+      gameVideo = feed.track;
+      gameHeight = OUT_H;
     }
     if (!gameAudio) gameAudio = audioTracks()[0] || null;
     return { video: gameVideo || card.track, audio: gameAudio || silent };
@@ -214,7 +282,8 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
         if (want === gameVideo) {
           tuneVideoSender(sender, gameHeight);
           say("En la tele ✓", true, "¡A jugar!");
-          report("phone", "game-on-tv", { tv: tvCode, h: gameHeight });
+          report("phone", "game-on-tv", { tv: tvCode, src: [getCanvas()?.width, getCanvas()?.height], audio: audioInfo(), gameAudio: !!gameAudio });
+          setTimeout(() => report("phone", "audio-5s", { tv: tvCode, audio: audioInfo(), gameAudio: !!gameAudio, sender: audioSenderTrack(pc) }), 5000);
         }
       }
     }
@@ -228,7 +297,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
     say("Conectando con la tele…", false, "Conectando…");
     const c = callWithoutDataChannel(peer, TV_PREFIX + tvCode, stream, {
       metadata: { console: consoleId },
-      sdpTransform: preferH264,
+      sdpTransform: sdp => boostBitrate(preferH264(sdp)),
     });
     call = c;
     const pcWatch = setInterval(() => {
@@ -290,6 +359,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
       call = null;
       try { old && old.close(); } catch (e) { /* ya cerrada */ }
       card.stop();
+      if (feed) feed.stop();
     },
   };
 }

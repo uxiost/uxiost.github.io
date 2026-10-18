@@ -178,3 +178,15 @@ body.padpage .screen { touch-action: auto; }
 .choice { display: block; text-decoration: none; color: inherit; }
 .choice:hover { border-color: var(--accent); }
 .choice .big { font-size: 2.2rem; }
+
+/* Móvil en vertical: juego arriba a todo lo ancho, mando debajo. */
+@media (orientation: portrait) {
+  body.console.playing.touch #stage { grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr; }
+  body.console.playing.touch #game { grid-column: 1 / span 2; grid-row: 1; width: 100%; height: auto; max-width: none; aspect-ratio: 4 / 3; }
+  body.console.playing.touch .side.left { grid-column: 1; grid-row: 2; }
+  body.console.playing.touch .side.right { grid-column: 2; grid-row: 2; }
+  body.console.playing.touch .side { justify-content: space-evenly; padding-top: 12px; }
+  .side .dpad { width: min(40vw, 30vh, 220px); }
+  .side .face { width: min(42vw, 32vh, 230px); }
+  .side .sh { width: min(19vw, 90px); }
+}

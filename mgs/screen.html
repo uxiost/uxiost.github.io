@@ -39,7 +39,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
   <script type="module">
     import { PEER_PREFIX, BUTTONS, randomCode } from "./js/protocol.js";
-    import { TV_PREFIX, lowLatencyReceivers } from "./js/stream.js";
+    import { TV_PREFIX, lowLatencyReceivers, boostBitrate } from "./js/stream.js";
     import { remember, report, selfTest } from "./js/diag.js";
 
     // Un candidato de red que este motor no entiende (p. ej. direcciones .local de
@@ -78,7 +78,7 @@
         if (e.type === "unavailable-id") { peer.destroy(); setTimeout(start, 3000); }
       });
       peer.on("call", call => {
-        call.answer();
+        call.answer(undefined, { sdpTransform: boostBitrate });
         report("tv", "call", { code });
         call.peerConnection && (call.peerConnection.onconnectionstatechange = () =>
           report("tv", "pc-state", { code, st: call.peerConnection.connectionState }));
