@@ -3,8 +3,8 @@
 // su navegador o en su Chromecast integrado mediante un receptor público que
 // carga páginas web (DashCast o URL Cast Receiver), sin registrar ninguna app.
 
-import { PEER_PREFIX } from "./protocol.js?v=14";
-import { report } from "./diag.js?v=14";
+import { PEER_PREFIX } from "./protocol.js?v=15";
+import { report } from "./diag.js?v=15";
 
 export const TV_PREFIX = PEER_PREFIX + "tv-";
 
@@ -64,6 +64,16 @@ export function audioInfo() {
   return out;
 }
 
+// Eventos del móvil que pueden cortar el envío (pantalla apagada, cambiar de app,
+// mando Bluetooth…): se anotan en el diagnóstico mientras se envía a la tele.
+let streaming = false;
+for (const ev of ["visibilitychange", "freeze", "resume", "gamepadconnected", "gamepaddisconnected", "online", "offline"]) {
+  (ev === "visibilitychange" || ev === "freeze" || ev === "resume" ? document : window).addEventListener(ev, e => {
+    if (!streaming) return;
+    report("phone", "event", { e: ev, vis: document.visibilityState, pad: e.gamepad ? e.gamepad.id.slice(0, 40) : undefined });
+  });
+}
+
 export function setLocalMuted(muted) {
   localMuted = muted;
   for (const { local } of taps.values()) local.gain.value = muted ? 0 : 1;
@@ -100,7 +110,7 @@ export function boostBitrate(sdp) {
   const lines = sdp.split("\r\n");
   const vp8 = lines.filter(l => /^a=rtpmap:\d+ (VP8|H264)\/90000/i.test(l)).map(l => l.match(/^a=rtpmap:(\d+)/)[1]);
   // Sin mínimo forzado: si la wifi o la tele no dan abasto, el emisor debe poder bajar.
-  const extra = "x-google-start-bitrate=400;x-google-max-bitrate=900";
+  const extra = "x-google-start-bitrate=800;x-google-max-bitrate=1800";
   for (const pt of vp8) {
     const i = lines.findIndex(l => l.startsWith(`a=fmtp:${pt} `));
     if (i >= 0) {
@@ -122,14 +132,14 @@ export function lowLatencyReceivers(pc) {
 
 // La tele del Chromecast decodifica VP8 por software y va justa de CPU:
 // 480 líneas y 30 fps sobran para PS1 (240–480 de origen).
-const MAX_LINES = 240;
+const MAX_LINES = 480;
 const FPS = 30;
 
 // Copiamos solo la imagen del juego (4:3, sin las bandas negras del lienzo del
 // emulador) a un lienzo fijo de 640×480. Así la resolución en la tele no depende
-// de cómo sujetes el móvil. 320×240 es la resolución nativa de MGS1 en PS1: no se
-// pierde detalle, y la tele (sin aceleración gráfica) la decodifica sin esfuerzo.
-const OUT_W = 320, OUT_H = 240;
+// de cómo sujetes el móvil. 640×480 (el doble de la resolución nativa de MGS1):
+// la tele de prueba la decodifica a 30 fps en ~7 ms por imagen.
+const OUT_W = 640, OUT_H = 480;
 function gameFeed(src) {
   const out = document.createElement("canvas");
   out.width = OUT_W;
@@ -155,7 +165,7 @@ async function tuneVideoSender(sender, height) {
   const p = sender.getParameters();
   p.degradationPreference = "balanced";
   p.encodings = p.encodings && p.encodings.length ? p.encodings : [{}];
-  p.encodings[0].maxBitrate = 800_000;
+  p.encodings[0].maxBitrate = 1_600_000;
   p.encodings[0].maxFramerate = FPS;
   p.encodings[0].scaleResolutionDownBy = Math.max(1, (height || MAX_LINES) / MAX_LINES);
   try { await sender.setParameters(p); } catch (e) { console.warn("setParameters", e); }
@@ -215,7 +225,8 @@ function silentAudioTrack() {
 // Cómo va el emisor: fps codificados, si algo lo limita (cpu/ancho de banda), RTT…
 async function sendStats(pc, tvCode, stage) {
   if (!pc || pc.connectionState === "closed") return;
-  const out = { tv: tvCode, st: pc.connectionState };
+  const pads = [...(navigator.getGamepads ? navigator.getGamepads() : [])].filter(Boolean).length;
+  const out = { tv: tvCode, st: pc.connectionState, vis: document.visibilityState, pads, audio: audioInfo() };
   (await pc.getStats()).forEach(r => {
     if (r.type === "outbound-rtp" && r.kind === "video") Object.assign(out, {
       w: r.frameWidth, h: r.frameHeight, fps: r.framesPerSecond, limit: r.qualityLimitationReason,
@@ -303,9 +314,12 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
           tuneVideoSender(sender, gameHeight);
           say("En la tele ✓", true, "¡A jugar!");
           report("phone", "game-on-tv", { tv: tvCode, src: [getCanvas()?.width, getCanvas()?.height], audio: audioInfo(), gameAudio: !!gameAudio });
-          setTimeout(() => report("phone", "audio-5s", { tv: tvCode, audio: audioInfo(), gameAudio: !!gameAudio, sender: audioSenderTrack(pc) }), 5000);
-          setTimeout(() => sendStats(pc, tvCode, "enc-15s"), 15000);
-          setTimeout(() => sendStats(pc, tvCode, "enc-60s"), 60000);
+          // Salud del envío cada 15 s durante 90 s (pocos mensajes: el canal tiene límite diario).
+          let n = 0;
+          const health = setInterval(() => {
+            if (++n > 6 || !call || call.peerConnection !== pc) return clearInterval(health);
+            sendStats(pc, tvCode, "health");
+          }, 15000);
         }
       }
     }
@@ -374,10 +388,12 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
   peer.on("error", onPeerError);
 
   upgrade = setInterval(upgradeTracks, 1000);
+  streaming = true;
   attempt();
   return {
     stop() {
       stopped = true;
+      streaming = false;
       clearTimeout(timer);
       clearInterval(upgrade);
       peer.off("error", onPeerError);

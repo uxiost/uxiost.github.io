@@ -8,7 +8,7 @@
   <script>
     // Siempre la última versión: si la publicada no es la que se ha cargado
     // (caché del navegador o del service worker), se recarga una vez.
-    window.MGS_BUILD = "14";
+    window.MGS_BUILD = "15";
     (function () {
       if (MGS_BUILD.indexOf("__") === 0) return; // copia local de desarrollo
       fetch("version.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
@@ -25,7 +25,7 @@
     })();
   </script>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=14">
+  <link rel="stylesheet" href="css/style.css?v=15">
   <style>
     [hidden] { display: none !important; }
     html, body { background: #000; height: 100%; overflow: hidden; }
@@ -50,6 +50,7 @@
     <p class="muted" id="howto">En el móvil, abre <b>uxiost.github.io/mgs/play.html</b> → <b>Ver en la tele</b> y escribe:</p>
     <div class="code" id="code">·····</div>
     <p class="muted" id="state">Preparando…</p>
+    <p class="muted small">Al abrir esta pantalla suena un pitido corto: si lo oyes, el sonido de la tele funciona.</p>
     <p class="muted small">El juego corre en el móvil; esta pantalla solo muestra la imagen. Puedes jugar con un mando Bluetooth emparejado con la tele o con los botones de colores del mando de la tele.</p>
   </div>
   <button id="sound" class="primary" hidden>🔊 Pulsa OK para activar el sonido</button>
@@ -64,6 +65,7 @@
     const { BUTTONS, randomCode } = await import("./js/protocol.js" + q);
     const { TV_PREFIX, lowLatencyReceivers, boostBitrate } = await import("./js/stream.js" + q);
     const { remember, report, selfTest } = await import("./js/diag.js" + q);
+    const { mseAudioSupported, startMseAudio, beep } = await import("./js/tvaudio.js" + q);
     setInterval(async () => {
       const v = await fetch("version.json", { cache: "no-store" }).then(r => r.json()).then(j => j.v).catch(() => version);
       if (v !== version) location.reload();
@@ -97,7 +99,7 @@
     // En el Chromecast el audio de WebRTC no sale por el reproductor de vídeo:
     // lo sacamos por Web Audio, que usa otra ruta de salida.
     const isCast = /CrKey/.test(navigator.userAgent);
-    let audioCtx = null, audioSrc = null, audioTrackId = "";
+    let audioCtx = null, audioSrc = null, audioTrackId = "", mse = null;
 
     function start() {
       peer = new Peer(TV_PREFIX + code, { debug: 3, logFunction: (lvl, ...a) => remember(...a) });
@@ -189,23 +191,31 @@
       if (!track || track.id === audioTrackId) return;
       try {
         audioCtx = audioCtx || new AudioContext({ latencyHint: "interactive" });
+        if (mse) { mse.stop(); mse = null; }
         if (audioSrc) audioSrc.disconnect();
         audioSrc = audioCtx.createMediaStreamSource(new MediaStream([track]));
-        audioSrc.connect(audioCtx.destination);
         audioTrackId = track.id;
         window.__mgsAudio = { ctx: audioCtx, src: audioSrc }; // para depurar
         audioCtx.resume().catch(() => {});
+        if (mseAudioSupported()) {
+          // Ruta que sí suena en el Chromecast de LG: reproductor multimedia normal.
+          mse = startMseAudio(audioCtx, audioSrc);
+          window.__mgsAudio.mse = mse;
+        } else {
+          audioSrc.connect(audioCtx.destination);
+          report("tv", "mse-unsupported", { code });
+        }
         // Si Web Audio no arranca, volvemos al audio del reproductor de vídeo.
         setTimeout(() => {
           if (audioCtx.state !== "running") { video.volume = 1; report("tv", "webaudio-not-running", { code, st: audioCtx.state }); }
         }, 2000);
       } catch (e) {
         audioSrc = null;
+        video.volume = 1;
         report("tv", "webaudio-error", { code, msg: String(e) });
       }
     }
 
-    // Informe de audio y vídeo a los 10 s: ¿llega audio con energía? ¿se congela la imagen?
     // Pico de señal que de verdad entra en Web Audio durante 1 s.
     async function webAudioPeak() {
       if (!audioCtx || !audioSrc) return null;
@@ -229,6 +239,7 @@
       lagMax = 0;
       const out = { code, version, isCast, ctx: audioCtx && audioCtx.state, videoMuted: video.muted, vol: video.volume, paused: video.paused, waPeak: await webAudioPeak(), shownFps: await presentedFps() };
       out.lagMaxMs = Math.round(lagMax);
+      out.mse = mse ? mse.info() : (isCast ? "no" : "n/a");
       (await pc.getStats()).forEach(r => {
         if (r.type !== "inbound-rtp") return;
         if (r.kind === "audio") Object.assign(out, { aPkts: r.packetsReceived, aLost: r.packetsLost, aEnergy: r.totalAudioEnergy, aLevel: r.audioLevel, aConcealed: r.concealedSamples, aSamples: r.totalSamplesReceived });
@@ -302,6 +313,9 @@
     }, 2000);
 
     start();
+
+    // Pitido al abrir: si se oye, la salida de audio de la tele funciona.
+    beep().then(r => report("tv", "beep", { code, r }));
 
     // Autodiagnóstico al abrir: ¿funciona WebRTC dentro de esta tele?
     selfTest().then(r => {

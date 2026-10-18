@@ -55,6 +55,8 @@ export async function selfTest() {
   for (let i = 0; i < 30_000_000; i++) { x = (x * 1103515245 + 12345) | 0; acc ^= x >>> 7; }
   out.benchMs = Math.round(performance.now() - t0) + (acc === 0.5 ? "" : "");
   out.gamepadApi = typeof navigator.getGamepads;
+  out.mseOpus = typeof MediaSource !== "undefined" && MediaSource.isTypeSupported('audio/webm; codecs="opus"');
+  out.recOpus = typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm;codecs=opus");
   out.loopData = await loop(false).catch(e => "FAIL " + e.name + ": " + e.message);
   out.loopVideo = await loop(true).catch(e => "FAIL " + e.name + ": " + e.message);
   return out;
