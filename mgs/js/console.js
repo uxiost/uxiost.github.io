@@ -2,7 +2,7 @@
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
 import * as store from "./storage.js";
-import { PEER_PREFIX, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js";
 import { attachTouchPad, PAD_HTML } from "./padui.js";
 import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js";
 import { installAudioTap, setLocalMuted, streamTo, castPage } from "./stream.js";
@@ -641,6 +641,28 @@ $("#optTouch").onchange = e => {
 window.addEventListener("gamepadconnected", () => { applyTouchMode(); toast("Mando conectado"); });
 window.addEventListener("gamepaddisconnected", applyTouchMode);
 applyTouchMode();
+
+// ---------------------------------------------------------------- stick izquierdo como cruceta
+// El núcleo emula un mando digital: el stick de un DualShock 4 / Xbox no movería
+// a Snake. Lo traducimos a la cruceta para el mando del jugador 1.
+
+const stickPad = { player: 0, mask: 0 };
+function pollSticks() {
+  let m = 0;
+  if (started) {
+    const gp = [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(Boolean);
+    if (gp && gp.axes.length >= 2) {
+      const [x, y] = gp.axes;
+      if (x < -0.5) m |= 1 << BUTTONS.left;
+      if (x > 0.5) m |= 1 << BUTTONS.right;
+      if (y < -0.5) m |= 1 << BUTTONS.up;
+      if (y > 0.5) m |= 1 << BUTTONS.down;
+    }
+  }
+  if (m !== stickPad.mask) applyMask(stickPad, m);
+  requestAnimationFrame(pollSticks);
+}
+requestAnimationFrame(pollSticks);
 
 // ---------------------------------------------------------------- descarga desde enlace
 
