@@ -4,6 +4,7 @@
 // carga páginas web (DashCast o URL Cast Receiver), sin registrar ninguna app.
 
 import { PEER_PREFIX } from "./protocol.js";
+import { report } from "./diag.js";
 
 export const TV_PREFIX = PEER_PREFIX + "tv-";
 
@@ -145,6 +146,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
       const pc = c.peerConnection;
       if (!pc) return;
       const st = pc.connectionState || pc.iceConnectionState;
+      if (st !== c.__lastSt) { c.__lastSt = st; report("phone", "pc-state", { tv: tvCode, st }); }
       if (st === "connected" && !connected) {
         connected = true;
         tuneSenders(pc, canvas);
@@ -177,6 +179,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
 
   // PeerJS avisa de "peer-unavailable" en el objeto peer, no en la llamada.
   const onPeerError = err => {
+    report("phone", "peer-error", { tv: tvCode, type: err && err.type, msg: String(err && err.message) });
     if (err && err.type === "peer-unavailable" && String(err.message).includes(TV_PREFIX + tvCode)) retry();
   };
   peer.on("error", onPeerError);

@@ -39,7 +39,21 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
   <script type="module">
     import { PEER_PREFIX, BUTTONS, randomCode } from "./js/protocol.js";
-    import { TV_PREFIX, preferH264, lowLatencyReceivers } from "./js/stream.js";
+    import { TV_PREFIX, lowLatencyReceivers } from "./js/stream.js";
+    import { remember, report, selfTest } from "./js/diag.js";
+
+    // Un candidato de red que este motor no entiende (p. ej. direcciones .local de
+    // Android) no debe tumbar la conexión: lo anotamos y seguimos con los demás.
+    if (window.RTCPeerConnection) {
+      const addIce = RTCPeerConnection.prototype.addIceCandidate;
+      RTCPeerConnection.prototype.addIceCandidate = function (...args) {
+        return Promise.resolve(addIce.apply(this, args)).catch(err => {
+          remember("addIceCandidate ignorado", err, args[0] && args[0].candidate);
+        });
+      };
+    } else {
+      report("tv", "no-webrtc", { ua: navigator.userAgent });
+    }
 
     const $ = s => document.querySelector(s);
     const video = $("#video");
@@ -55,11 +69,12 @@
     let peer, ctrl = null, mask = 0, lastSent = 0;
 
     function start() {
-      peer = new Peer(TV_PREFIX + code, { debug: 1 });
+      peer = new Peer(TV_PREFIX + code, { debug: 3, logFunction: (lvl, ...a) => remember(...a) });
       peer.on("open", () => { $("#state").textContent = "Esperando al móvil…"; });
       peer.on("disconnected", () => setTimeout(() => !peer.destroyed && peer.reconnect(), 1500));
       peer.on("error", e => {
-        $("#state").textContent = `Error de conexión (${e.type}). Reintentando…`;
+        $("#state").textContent = `Error de conexión (${e.type}: ${e.message || ""}). Reintentando…`;
+        report("tv", "peer-error", { code, type: e.type, msg: String(e.message || e) });
         if (e.type === "unavailable-id") { peer.destroy(); setTimeout(start, 3000); }
       });
       // Avisos del móvil ("pulsa Jugar", "recibiendo…").
@@ -68,7 +83,10 @@
         c.on("data", m => { if (m && m.t === "status" && m.msg) $("#state").textContent = m.msg; });
       });
       peer.on("call", call => {
-        call.answer(undefined, { sdpTransform: preferH264 });
+        call.answer();
+        report("tv", "call", { code });
+        call.peerConnection && (call.peerConnection.onconnectionstatechange = () =>
+          report("tv", "pc-state", { code, st: call.peerConnection.connectionState }));
         call.on("stream", s => show(s, call));
         call.on("close", () => { $("#wait").hidden = false; $("#state").textContent = "El móvil se ha desconectado. Esperando…"; });
         // Canal de vuelta: el mando de la tele llega al móvil como un mando más.
@@ -152,6 +170,13 @@
     }, 2000);
 
     start();
+
+    // Autodiagnóstico al abrir: ¿funciona WebRTC dentro de esta tele?
+    selfTest().then(r => {
+      report("tv", "selftest", { code, ...r });
+      $("#stat").textContent = `datos: ${String(r.loopData).slice(0, 40)} · vídeo: ${String(r.loopVideo).slice(0, 40)}`;
+    });
+    window.addEventListener("error", e => report("tv", "js-error", { msg: e.message }));
   </script>
 </body>
 </html>
