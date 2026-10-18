@@ -99,7 +99,7 @@ export function boostBitrate(sdp) {
   const lines = sdp.split("\r\n");
   const vp8 = lines.filter(l => /^a=rtpmap:\d+ (VP8|H264)\/90000/i.test(l)).map(l => l.match(/^a=rtpmap:(\d+)/)[1]);
   // Sin mínimo forzado: si la wifi o la tele no dan abasto, el emisor debe poder bajar.
-  const extra = "x-google-start-bitrate=1000;x-google-max-bitrate=1800";
+  const extra = "x-google-start-bitrate=400;x-google-max-bitrate=900";
   for (const pt of vp8) {
     const i = lines.findIndex(l => l.startsWith(`a=fmtp:${pt} `));
     if (i >= 0) {
@@ -121,14 +121,14 @@ export function lowLatencyReceivers(pc) {
 
 // La tele del Chromecast decodifica VP8 por software y va justa de CPU:
 // 480 líneas y 30 fps sobran para PS1 (240–480 de origen).
-const MAX_LINES = 360;
+const MAX_LINES = 240;
 const FPS = 30;
 
 // Copiamos solo la imagen del juego (4:3, sin las bandas negras del lienzo del
 // emulador) a un lienzo fijo de 640×480. Así la resolución en la tele no depende
-// de cómo sujetes el móvil. 480×360 supera la resolución nativa de MGS1 (320×240)
-// y es lo que el decodificador por software de la tele aguanta con holgura.
-const OUT_W = 480, OUT_H = 360;
+// de cómo sujetes el móvil. 320×240 es la resolución nativa de MGS1 en PS1: no se
+// pierde detalle, y la tele (sin aceleración gráfica) la decodifica sin esfuerzo.
+const OUT_W = 320, OUT_H = 240;
 function gameFeed(src) {
   const out = document.createElement("canvas");
   out.width = OUT_W;
@@ -154,7 +154,7 @@ async function tuneVideoSender(sender, height) {
   const p = sender.getParameters();
   p.degradationPreference = "balanced";
   p.encodings = p.encodings && p.encodings.length ? p.encodings : [{}];
-  p.encodings[0].maxBitrate = 1_500_000;
+  p.encodings[0].maxBitrate = 800_000;
   p.encodings[0].maxFramerate = FPS;
   p.encodings[0].scaleResolutionDownBy = Math.max(1, (height || MAX_LINES) / MAX_LINES);
   try { await sender.setParameters(p); } catch (e) { console.warn("setParameters", e); }
@@ -209,6 +209,24 @@ function silentAudioTrack() {
   } catch (e) {
     return null;
   }
+}
+
+// Cómo va el emisor: fps codificados, si algo lo limita (cpu/ancho de banda), RTT…
+async function sendStats(pc, tvCode, stage) {
+  if (!pc || pc.connectionState === "closed") return;
+  const out = { tv: tvCode, st: pc.connectionState };
+  (await pc.getStats()).forEach(r => {
+    if (r.type === "outbound-rtp" && r.kind === "video") Object.assign(out, {
+      w: r.frameWidth, h: r.frameHeight, fps: r.framesPerSecond, limit: r.qualityLimitationReason,
+      target: r.targetBitrate, encMs: r.framesEncoded ? Math.round(1000 * r.totalEncodeTime / r.framesEncoded) : null,
+      nack: r.nackCount, pli: r.pliCount, keyframes: r.keyFramesEncoded, retx: r.retransmittedPacketsSent,
+    });
+    if (r.type === "candidate-pair" && r.nominated && r.state === "succeeded") Object.assign(out, {
+      rttMs: r.currentRoundTripTime != null ? Math.round(r.currentRoundTripTime * 1000) : null,
+      availOut: r.availableOutgoingBitrate,
+    });
+  });
+  report("phone", stage, out);
 }
 
 function audioSenderTrack(pc) {
@@ -285,6 +303,8 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
           say("En la tele ✓", true, "¡A jugar!");
           report("phone", "game-on-tv", { tv: tvCode, src: [getCanvas()?.width, getCanvas()?.height], audio: audioInfo(), gameAudio: !!gameAudio });
           setTimeout(() => report("phone", "audio-5s", { tv: tvCode, audio: audioInfo(), gameAudio: !!gameAudio, sender: audioSenderTrack(pc) }), 5000);
+          setTimeout(() => sendStats(pc, tvCode, "enc-15s"), 15000);
+          setTimeout(() => sendStats(pc, tvCode, "enc-60s"), 60000);
         }
       }
     }

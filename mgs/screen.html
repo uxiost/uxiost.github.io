@@ -38,9 +38,17 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
   <script type="module">
-    import { PEER_PREFIX, BUTTONS, randomCode } from "./js/protocol.js";
-    import { TV_PREFIX, lowLatencyReceivers, boostBitrate } from "./js/stream.js";
-    import { remember, report, selfTest } from "./js/diag.js";
+    // La tele no se recarga sola al publicar cambios: cargamos los módulos con la
+    // versión actual (evita cachés viejas) y comprobamos cada minuto si hay otra.
+    const version = await fetch("version.json", { cache: "no-store" }).then(r => r.json()).then(j => j.v).catch(() => 0);
+    const q = "?v=" + version;
+    const { BUTTONS, randomCode } = await import("./js/protocol.js" + q);
+    const { TV_PREFIX, lowLatencyReceivers, boostBitrate } = await import("./js/stream.js" + q);
+    const { remember, report, selfTest } = await import("./js/diag.js" + q);
+    setInterval(async () => {
+      const v = await fetch("version.json", { cache: "no-store" }).then(r => r.json()).then(j => j.v).catch(() => version);
+      if (v !== version) location.reload();
+    }, 60000);
 
     // Un candidato de red que este motor no entiende (p. ej. direcciones .local de
     // Android) no debe tumbar la conexión: lo anotamos y seguimos con los demás.
@@ -118,6 +126,18 @@
       }
     })();
 
+    // Fotogramas que de verdad se pintan en pantalla (no solo los recibidos) y
+    // cuánto se atasca la página: así sabemos si la tele va sobrepasada.
+    let presented = 0;
+    const countFrames = () => { presented++; video.requestVideoFrameCallback(countFrames); };
+    if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) video.requestVideoFrameCallback(countFrames);
+    let lagMax = 0, lagLast = performance.now();
+    setInterval(() => { const now = performance.now(); lagMax = Math.max(lagMax, now - lagLast - 100); lagLast = now; }, 100);
+    async function presentedFps() {
+      const a = presented; await new Promise(r => setTimeout(r, 2000));
+      return Math.round((presented - a) / 2 * 10) / 10;
+    }
+
     let statsSent = false;
     function show(stream, call) {
       // "stream" llega una vez por pista (audio y vídeo): no recargar si es el mismo.
@@ -187,7 +207,9 @@
     async function reportAV(call, stage) {
       const pc = call && call.peerConnection;
       if (!pc) return;
-      const out = { code, isCast, ctx: audioCtx && audioCtx.state, videoMuted: video.muted, vol: video.volume, paused: video.paused, waPeak: await webAudioPeak() };
+      lagMax = 0;
+      const out = { code, version, isCast, ctx: audioCtx && audioCtx.state, videoMuted: video.muted, vol: video.volume, paused: video.paused, waPeak: await webAudioPeak(), shownFps: await presentedFps() };
+      out.lagMaxMs = Math.round(lagMax);
       (await pc.getStats()).forEach(r => {
         if (r.type !== "inbound-rtp") return;
         if (r.kind === "audio") Object.assign(out, { aPkts: r.packetsReceived, aLost: r.packetsLost, aEnergy: r.totalAudioEnergy, aLevel: r.audioLevel, aConcealed: r.concealedSamples, aSamples: r.totalSamplesReceived });
@@ -251,7 +273,7 @@
         if (r.type === "inbound-rtp" && r.kind === "video") {
           const fps = r.framesPerSecond ? Math.round(r.framesPerSecond) : "?";
           const jb = r.jitterBufferEmittedCount ? Math.round(1000 * r.jitterBufferDelay / r.jitterBufferEmittedCount) : "?";
-          $("#stat").textContent = `${r.frameWidth || "?"}×${r.frameHeight || "?"} · ${fps} fps · búfer ${jb} ms · ${r.decoderImplementation || ""}`;
+          $("#stat").textContent = `v${version} · ${r.frameWidth || "?"}×${r.frameHeight || "?"} · ${fps} fps · búfer ${jb} ms`;
           if (!statsSent && r.framesDecoded > 300) {
             statsSent = true;
             report("tv", "stats", { code, w: r.frameWidth, h: r.frameHeight, fps, jb, dropped: r.framesDropped, decoded: r.framesDecoded, dec: r.decoderImplementation, codec: r.codecId });

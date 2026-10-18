@@ -825,6 +825,17 @@ $("#castBtn").onclick = async () => {
 // ---------------------------------------------------------------- arranque
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+
+// Aviso de versión nueva (la tele se actualiza sola; el móvil, al recargar).
+(async () => {
+  const get = () => fetch("version.json", { cache: "no-store" }).then(r => r.json()).then(j => j.v).catch(() => null);
+  const mine = await get();
+  setInterval(async () => {
+    const v = await get();
+    if (mine && v && v !== mine) toast("Hay una versión nueva de la app: recarga la página cuando puedas", 6000);
+  }, 120000);
+})();
+
 renderDiscs();
 startPeer(codeForPeer());
 if (localStorage.getItem("mgs.tv")) {
