@@ -3,9 +3,9 @@
 // su navegador o en su Chromecast integrado mediante un receptor público que
 // carga páginas web (DashCast o URL Cast Receiver), sin registrar ninguna app.
 
-import { PEER_PREFIX } from "./protocol.js?v=17";
-import { report } from "./diag.js?v=17";
-import { readBackChannel } from "./backchan.js?v=17";
+import { PEER_PREFIX } from "./protocol.js?v=18";
+import { report } from "./diag.js?v=18";
+import { readBackChannel } from "./backchan.js?v=18";
 
 export const TV_PREFIX = PEER_PREFIX + "tv-";
 
@@ -79,6 +79,8 @@ export function setLocalMuted(muted) {
   localMuted = muted;
   for (const { local } of taps.values()) local.gain.value = muted ? 0 : 1;
 }
+
+export function getAudioTrack() { return audioTracks()[0] || null; }
 
 function audioTracks() {
   for (const { tap } of taps.values()) {
@@ -617,12 +619,14 @@ export const RECEIVERS = {
   dashcast: {
     appId: "84912283",
     ns: "urn:x-cast:com.madmod.dashcast",
-    msg: url => ({ url, force: false, reload: false, reload_time: 0 }),
+    // force: la página pasa a ser la principal del receptor (no un iframe), con
+    // acceso a los mensajes de la sesión y al reproductor por hardware.
+    msg: (url, force) => ({ url, force: !!force, reload: false, reload_time: 0 }),
   },
   urlcast: {
     appId: "5CB45E5A",
     ns: "urn:x-cast:com.url.cast",
-    msg: url => ({ type: "iframe", url }),
+    msg: (url, force) => ({ type: force ? "loc" : "iframe", url }),
   },
 };
 
@@ -641,13 +645,16 @@ function loadCastSdk() {
 }
 
 // Se debe llamar desde un toque del usuario (Chrome lo exige para abrir el selector).
-export async function castPage(url, which = "dashcast") {
+// Devuelve la sesión y el espacio de nombres por el que se puede hablar con la página.
+export async function castPage(url, which = "dashcast", { force = false, fresh = false } = {}) {
   const r = RECEIVERS[which];
   await loadCastSdk();
   const ctx = cast.framework.CastContext.getInstance();
-  ctx.setOptions({ receiverApplicationId: r.appId, autoJoinPolicy: chrome.cast.AutoJoinPolicy.PAGE_SCOPED });
+  ctx.setOptions({ receiverApplicationId: r.appId, autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED });
   const current = ctx.getCurrentSession();
-  if (current && current.getApplicationMetadata && current.getApplicationMetadata()?.applicationId !== r.appId) {
+  // Una sesión anterior puede tener ya nuestra página a pantalla completa (sin el
+  // código del receptor que entiende "abre esta dirección"): empezar de cero.
+  if (current && (fresh || (current.getApplicationMetadata && current.getApplicationMetadata()?.applicationId !== r.appId))) {
     ctx.endCurrentSession(true);
   }
   if (!ctx.getCurrentSession()) {
@@ -655,8 +662,36 @@ export async function castPage(url, which = "dashcast") {
     if (err) throw new Error(err === "cancel" ? "Cancelado" : `Chromecast: ${err}`);
   }
   const session = ctx.getCurrentSession();
-  await session.sendMessage(r.ns, r.msg(url));
+  await session.sendMessage(r.ns, r.msg(url, force));
   // Por si el volumen de la sesión de Cast estaba a cero o silenciado.
   try { await session.setMute(false); } catch (e) { /* no soportado */ }
   try { await session.setVolume(1); } catch (e) { /* no soportado */ }
+  return { session, ns: r.ns };
+}
+
+// Tras recargar el móvil: volver a la sesión de Chromecast que siga abierta.
+export async function rejoinCast(which = "dashcast") {
+  const r = RECEIVERS[which];
+  await loadCastSdk();
+  const ctx = cast.framework.CastContext.getInstance();
+  ctx.setOptions({ receiverApplicationId: r.appId, autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED });
+  for (let i = 0; i < 25 && !ctx.getCurrentSession(); i++) await new Promise(res => setTimeout(res, 200));
+  const session = ctx.getCurrentSession();
+  return session ? { session, ns: r.ns } : null;
+}
+
+// Canal de mensajes con la página de la tele a través de la sesión de Chromecast.
+export function castTransport({ session, ns }) {
+  const listeners = [];
+  const onMsg = (n, msg) => {
+    let m = msg;
+    if (typeof m === "string") { try { m = JSON.parse(m); } catch (e) { return; } }
+    for (const l of listeners) l(m);
+  };
+  session.addMessageListener(ns, onMsg);
+  return {
+    send: obj => session.sendMessage(ns, obj),
+    onMessage: cb => listeners.push(cb),
+    close: () => { try { session.removeMessageListener(ns, onMsg); } catch (e) { /* sesión cerrada */ } },
+  };
 }

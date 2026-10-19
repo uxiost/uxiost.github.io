@@ -1,11 +1,13 @@
 // Consola: ejecuta el emulador de PS1 (EmulatorJS, núcleo PCSX-ReARMed en
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
-import * as store from "./storage.js?v=17";
-import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=17";
-import { attachTouchPad, PAD_HTML } from "./padui.js?v=17";
-import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=17";
-import { installAudioTap, setLocalMuted, streamTo, castPage } from "./stream.js?v=17";
+import * as store from "./storage.js?v=18";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=18";
+import { attachTouchPad, PAD_HTML } from "./padui.js?v=18";
+import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=18";
+import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=18";
+import { startNative } from "./native.js?v=18";
+import { report } from "./diag.js?v=18";
 
 // Antes de que arranque el emulador: así podemos mandar su audio a la tele.
 installAudioTap();
@@ -33,10 +35,24 @@ let toastTimer;
 function toast(msg, ms = 2500) {
   const el = $("#toast");
   el.textContent = msg;
+  el.classList.remove("action");
   el.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove("show"), ms);
   broadcast({ t: "toast", msg });
+}
+
+// Aviso con un botón (p. ej. "¿No se oye? → sonido en el móvil").
+function toastAction(msg, label, fn, ms = 9000) {
+  const el = $("#toast");
+  el.textContent = msg + " ";
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.onclick = () => { el.classList.remove("show", "action"); fn(); };
+  el.appendChild(b);
+  el.classList.add("show", "action");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show", "action"), ms);
 }
 
 function broadcast(msg) {
@@ -748,7 +764,9 @@ async function runDownload(job, label, slotChoice, url, autoplay) {
 
 // ---------------------------------------------------------------- ver en la tele (streaming)
 
-let tvStream = null;
+let tvStream = null;   // envío por WebRTC (streamTo)
+let tvNative = null;   // envío directo al reproductor de la tele (startNative)
+let tvOn = 0;          // sube en cada conexión/desconexión: invalida intentos viejos
 const tvRemotePad = { player: 0, mask: 0 };
 
 function peerReady() {
@@ -758,47 +776,123 @@ function peerReady() {
   });
 }
 
+let tvConnectedAt = 0;
 function tvStatus(msg, ok) {
   const el = $("#tvState");
   el.textContent = msg;
   el.style.color = ok ? "var(--accent)" : "";
-  if (ok) toast(msg);
+  if (ok) { tvConnectedAt = tvConnectedAt || Date.now(); toast(msg); }
 }
 
-// ¿Dónde suena el juego? En el Chromecast de las LG el audio de la tele no sale por
-// ninguna vía probada (WebRTC, Web Audio, MediaSource), así que por defecto suena el móvil.
+// ¿Dónde suena el juego? Con el envío directo, en la tele (por su reproductor
+// normal). Con WebRTC en el Chromecast de las LG el audio de la tele no sale por
+// ninguna vía probada, así que ahí suena el móvil.
 function soundOnTv(viaCast) {
   const v = $("#soundOut").value;
-  return v === "tv" || (v === "auto" && !viaCast);
+  if (v === "phone") return false;
+  if (v === "tv") return true;
+  return tvNative ? true : !viaCast;
 }
+function applySound() {
+  if (!tvStream && !tvNative) return setLocalMuted(false);
+  const onTv = soundOnTv(tvViaCast);
+  setLocalMuted(onTv);
+  if (tvNative) tvNative.mute(!onTv);
+}
+
+const gameCanvas = () => (started && window.EJS_emulator && window.EJS_emulator.started ? window.EJS_emulator.canvas : null);
 
 let tvViaCast = false;
 async function startTv(tvCode, viaCast = tvViaCast) {
   tvCode = tvCode.trim().toLowerCase();
   if (!tvCode) return;
   stopTv();
+  const gen = tvOn;
   tvViaCast = viaCast;
+  tvConnectedAt = 0;
   localStorage.setItem("mgs.tvcast", viaCast ? "1" : "0");
   localStorage.setItem("mgs.tv", tvCode);
   document.body.classList.add("tvstream"); // zona de juego siempre 4:3: se captura sin copiar
   $("#tvStop").hidden = false;
   setLocalMuted(soundOnTv(viaCast));
   await peerReady();
-  const canvas = () => (started && window.EJS_emulator && window.EJS_emulator.started ? window.EJS_emulator.canvas : null);
-  tvStream = streamTo(peer, tvCode, canvas, peer.id, tvStatus, $("#tvQuality").value, {
+  if (gen !== tvOn) return;
+  tvStream = streamTo(peer, tvCode, gameCanvas, peer.id, tvStatus, $("#tvQuality").value, {
     // Mando de la tele (o mando emparejado con ella) por el vídeo de vuelta.
     onTvKeys: m => applyMask(tvRemotePad, m),
   });
 }
 
 function stopTv() {
+  tvOn++;
   if (tvStream) tvStream.stop();
   tvStream = null;
+  stopNative();
   localStorage.removeItem("mgs.tv");
   document.body.classList.remove("tvstream");
   setLocalMuted(false);
   $("#tvStop").hidden = true;
   $("#tvState").textContent = "";
+}
+
+// ---- envío directo (Chromecast con la página a pantalla completa)
+// El móvil codifica por hardware y la tele reproduce con su reproductor por
+// hardware, como una app de vídeo: más nitidez, menos trabajo para la tele y el
+// sonido sale por la tele. Si algo falla, se vuelve solo a WebRTC.
+function stopNative(tellTv = true) {
+  if (!tvNative) return;
+  clearInterval(tvNative.watch);
+  tvNative.stop(tellTv);
+  tvNative.transport.close();
+  tvNative = null;
+}
+
+async function tryNative(cast, tvCode) {
+  const gen = tvOn;
+  const alive = () => gen === tvOn;
+  let transport;
+  try { transport = castTransport(cast); } catch (e) { report("phone", "native-error", { msg: String(e) }); return; }
+  const sender = await startNative(transport, {
+    getCanvas: gameCanvas, getAudioTrack, alive, report, waitMs: 20000,
+    onStatus: msg => { if (tvNative === sender) { $("#tvState").textContent = msg; $("#tvState").style.color = "var(--accent)"; } },
+    onTvKeys: m => applyMask(tvRemotePad, m),
+  }).catch(e => { report("phone", "native-error", { msg: String(e) }); return null; });
+  if (!sender || !alive()) { if (sender) sender.stop(); transport.close(); return; }
+  // Relevo: la tele cuelga WebRTC en cuanto empieza el envío directo.
+  if (tvStream) { tvStream.stop(); tvStream = null; }
+  tvNative = sender;
+  window.__mgsTvNative = sender; // diagnóstico
+  sender.transport = transport;
+  applySound();
+  report("phone", "native-on", { tv: tvCode, codec: sender.stats.codec, audio: sender.stats.audio });
+  const t0 = Date.now();
+  let blind = 0;
+  const fallback = why => {
+    if (tvNative !== sender) return;
+    report("phone", "native-fallback", { tv: tvCode, why, stats: { ...sender.stats, tv: undefined }, tvStats: sender.stats.tv });
+    stopNative();
+    toast("El envío directo no va en esta tele: sigo por WebRTC.", 5000);
+    if (alive()) startTv(tvCode, true).then(() => applySound());
+  };
+  sender.watch = setInterval(() => {
+    const st = sender.stats;
+    if (st.err) return fallback("encoder: " + st.err);
+    const visible = document.visibilityState === "visible";
+    if (visible && gameCanvas() && Date.now() - sender.lastTvStatsAt > 10000) return fallback("sin respuesta de la tele");
+    const tv = st.tv;
+    if (visible && gameCanvas() && Date.now() - t0 > 8000 && (!tv || tv.shown < 3)) blind++; else blind = 0;
+    if (blind >= 4) fallback("la tele no muestra imagen: " + (tv && tv.err || "sin fotogramas"));
+  }, 2000);
+  setTimeout(() => {
+    if (tvNative !== sender || !sender.stats.tv || sender.stats.tv.shown < 3) return;
+    if (soundOnTv(true)) {
+      toastAction("En la tele en directo, con sonido. ¿No se oye en la tele?", "Sonido en el móvil", () => {
+        $("#soundOut").value = "phone";
+        try { localStorage.setItem("mgs.sound", "phone"); } catch (e) { /* sin almacenamiento */ }
+        applySound();
+      }, 12000);
+    } else toast("En la tele en directo ✓", 4000);
+  }, 6000);
 }
 
 $("#tvForm").onsubmit = async e => {
@@ -830,17 +924,42 @@ $("#tvQuality").onchange = e => {
 try { $("#soundOut").value = localStorage.getItem("mgs.sound") || "auto"; } catch (e) { /* sin almacenamiento */ }
 $("#soundOut").onchange = e => {
   try { localStorage.setItem("mgs.sound", e.target.value); } catch (err) { /* sin almacenamiento */ }
-  if (tvStream) setLocalMuted(soundOnTv(tvViaCast));
+  applySound();
 };
+const nativeCapable = typeof VideoEncoder !== "undefined" && typeof MediaStreamTrackProcessor !== "undefined";
+try { $("#castMode").value = (nativeCapable && localStorage.getItem("mgs.castmode")) || (nativeCapable ? "native" : "iframe"); } catch (e) { /* sin almacenamiento */ }
+$("#castMode").onchange = e => {
+  try { localStorage.setItem("mgs.castmode", e.target.value); } catch (err) { /* sin almacenamiento */ }
+};
+
 $("#castBtn").onclick = async () => {
   const tvCode = randomCode();
-  // ;noaudio: la tele no reproduce sonido (suena el móvil) y ahorra CPU.
-  const url = new URL(`screen.html?t=${Date.now()}#${tvCode}${soundOnTv(true) ? "" : ";noaudio"}`, location.href).href;
+  const native = nativeCapable && $("#castMode").value === "native";
+  const rcv = $("#castRcv").value;
+  // ;noaudio: con WebRTC la tele no reproduce sonido (suena el móvil) y ahorra CPU.
+  // ;native: la tele escucha los mensajes de la sesión para el envío directo.
+  const url = new URL(`screen.html?t=${Date.now()}#${tvCode}${soundOnTv(true) && !native ? "" : ";noaudio"}${native ? ";native" : ""}`, location.href).href;
   try {
     tvStatus("Elige tu tele en la lista…");
-    await castPage(url, $("#castRcv").value);
+    const cast = await castPage(url, rcv, { force: native, fresh: true });
+    try { localStorage.setItem("mgs.castrcv", rcv); } catch (e) { /* sin almacenamiento */ }
     tvStatus("Abriendo la pantalla en la tele…");
     await startTv(tvCode, true);
+    if (native) {
+      tryNative(cast, tvCode);
+      // Si la página a pantalla completa no llega a abrir en esta tele, ofrecer el
+      // modo compatible (necesita un toque: Chrome lo exige para elegir la tele).
+      const gen = tvOn;
+      setTimeout(() => {
+        if (gen !== tvOn || tvNative || tvConnectedAt) return;
+        report("phone", "native-page-silent", { tv: tvCode, rcv });
+        toastAction("La tele no responde.", "Probar modo compatible", () => {
+          $("#castMode").value = "iframe";
+          try { localStorage.setItem("mgs.castmode", "iframe"); } catch (e) { /* sin almacenamiento */ }
+          $("#castBtn").click();
+        }, 20000);
+      }, 30000);
+    }
     await playAfterTvConnect();
   } catch (err) {
     console.error(err);
@@ -866,8 +985,14 @@ $("#buildTag").textContent = "v" + window.MGS_BUILD;
 renderDiscs();
 startPeer(codeForPeer());
 if (localStorage.getItem("mgs.tv")) {
-  $("#tvCode").value = localStorage.getItem("mgs.tv");
-  startTv(localStorage.getItem("mgs.tv"), localStorage.getItem("mgs.tvcast") === "1");
+  const code = localStorage.getItem("mgs.tv"), viaCast = localStorage.getItem("mgs.tvcast") === "1";
+  $("#tvCode").value = code;
+  startTv(code, viaCast).then(async () => {
+    // Tras recargar: si la sesión de Chromecast sigue abierta, retomar el envío directo.
+    if (!viaCast || !nativeCapable || $("#castMode").value !== "native") return;
+    const cast = await rejoinCast(localStorage.getItem("mgs.castrcv") || "dashcast").catch(() => null);
+    if (cast) tryNative(cast, code);
+  });
 }
 
 const autoDisc = params.get("disc");

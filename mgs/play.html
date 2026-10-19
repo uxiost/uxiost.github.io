@@ -8,7 +8,7 @@
   <script>
     // Siempre la última versión: si la publicada no es la que se ha cargado
     // (caché del navegador o del service worker), se recarga una vez.
-    window.MGS_BUILD = "17";
+    window.MGS_BUILD = "18";
     (function () {
       if (MGS_BUILD.indexOf("__") === 0) return; // copia local de desarrollo
       fetch("version.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
@@ -26,7 +26,7 @@
   </script>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=17">
+  <link rel="stylesheet" href="css/style.css?v=18">
 </head>
 <body class="console">
   <div id="stage">
@@ -76,9 +76,15 @@
         </form>
         <label class="small">Sonido en
           <select id="soundOut">
-            <option value="auto">Automático (Chromecast: móvil · navegador de la tele: tele)</option>
+            <option value="auto">Automático (la tele si puede; si no, el móvil)</option>
             <option value="phone">El móvil</option>
             <option value="tv">La tele</option>
+          </select>
+        </label>
+        <label class="small">Envío al Chromecast
+          <select id="castMode">
+            <option value="native">Directo: reproductor de la tele (más nítido, con sonido)</option>
+            <option value="iframe">Compatible (vídeo WebRTC, sonido en el móvil)</option>
           </select>
         </label>
         <label class="small">Calidad en la tele
@@ -173,6 +179,6 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
-  <script type="module" src="js/console.js?v=17"></script>
+  <script type="module" src="js/console.js?v=18"></script>
 </body>
 </html>

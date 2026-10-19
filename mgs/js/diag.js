@@ -25,7 +25,13 @@ function safe(o) {
 }
 
 export function report(role, stage, data = {}) {
-  if (OFF) return;
+  if (OFF) {
+    // En el laboratorio: a la vista de la prueba, sin enviar nada.
+    const r = (window.__mgsReports = window.__mgsReports || []);
+    r.push({ r: role, s: stage, t: Math.round(performance.now()), ...data });
+    if (r.length > 500) r.shift();
+    return;
+  }
   const key = role + stage + JSON.stringify(data);
   if (key === lastKey) return; // repetido
   lastKey = key;

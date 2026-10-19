@@ -8,7 +8,7 @@
   <script>
     // Siempre la última versión: si la publicada no es la que se ha cargado
     // (caché del navegador o del service worker), se recarga una vez.
-    window.MGS_BUILD = "17";
+    window.MGS_BUILD = "18";
     (function () {
       if (MGS_BUILD.indexOf("__") === 0) return; // copia local de desarrollo
       fetch("version.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
@@ -25,7 +25,7 @@
     })();
   </script>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=17">
+  <link rel="stylesheet" href="css/style.css?v=18">
   <style>
     [hidden] { display: none !important; }
     html, body { background: #000; height: 100%; overflow: hidden; }
@@ -65,6 +65,7 @@
     const { BUTTONS, randomCode } = await import("./js/protocol.js" + q);
     const { TV_PREFIX, lowLatencyReceivers, boostBitrate } = await import("./js/stream.js" + q);
     const { makeBackChannel } = await import("./js/backchan.js" + q);
+    const { nativeSupport, startNativeReceiver } = await import("./js/native.js" + q);
     // Vídeo de vuelta diminuto: fps que pintamos y botones del mando de la tele.
     const back = makeBackChannel(15);
     const { remember, report, selfTest } = await import("./js/diag.js" + q);
@@ -102,6 +103,7 @@
     }
 
     let peer, ctrl = null, mask = 0, lastSent = 0, currentCall = null;
+    let nativeRx = null; // modo nativo (más abajo)
     // En el Chromecast el audio de WebRTC no sale por el reproductor de vídeo:
     // lo sacamos por Web Audio, que usa otra ruta de salida.
     const isCast = /CrKey/.test(navigator.userAgent);
@@ -117,6 +119,8 @@
         if (e.type === "unavailable-id") { peer.destroy(); setTimeout(start, 3000); }
       });
       peer.on("call", call => {
+        // En modo nativo el vídeo llega por la sesión de Chromecast: nada de WebRTC.
+        if (nativeRx && nativeRx.active) { try { call.close(); } catch (e) {} return; }
         // Una sola llamada a la vez: si el móvil reconecta, la anterior se cuelga
         // (dos vídeos a la vez ahogan el procesador de la tele).
         if (currentCall && currentCall !== call) { try { currentCall.close(); } catch (e) {} }
@@ -129,7 +133,7 @@
           report("tv", "pc-state", { code, st: call.peerConnection.connectionState }));
         call.on("stream", s => { if (call === currentCall) show(s, call); });
         call.on("close", () => {
-          if (call !== currentCall) return;
+          if (call !== currentCall || (nativeRx && nativeRx.active)) return;
           $("#wait").hidden = false;
           $("#state").textContent = "El móvil se ha desconectado. Esperando…";
         });
@@ -303,7 +307,7 @@
     });
     window.addEventListener("keyup", e => { const b = KEY_MAP[e.keyCode]; if (b) keys.delete(b); });
 
-    let backKeys = 0;
+    let backKeys = 0, padMask = 0;
     function poll() {
       const pressed = new Set(keys);
       for (const gp of navigator.getGamepads ? navigator.getGamepads() : []) {
@@ -318,6 +322,7 @@
       }
       let m = 0;
       for (const n of pressed) m |= 1 << BUTTONS[n];
+      padMask = m;
       if (ctrl && ctrl.open && (m !== mask || Date.now() - lastSent > 250)) {
         ctrl.send({ t: "s", b: m });
         mask = m;
@@ -365,6 +370,54 @@
     }, 5000);
 
     start();
+
+    // Modo nativo (vídeo y sonido por el reproductor por hardware de la tele, como
+    // las apps de vídeo): disponible si el móvil abrió esta página a pantalla
+    // completa en el Chromecast (;native) o en el laboratorio (;labnative).
+    (async () => {
+      let t;
+      if (flags.has("labnative")) {
+        const ls = [];
+        window.labNativeIn = m => ls.forEach(l => l(m));
+        t = { send: m => window.labNativeOut && window.labNativeOut(m), onMessage: cb => ls.push(cb) };
+      } else if (flags.has("native") && isCast) {
+        try {
+          const { castReceiverTransport } = await import("./js/castrx.js" + q);
+          t = await castReceiverTransport();
+          report("tv", "native-ready", { code });
+        } catch (e) {
+          report("tv", "native-error", { code, msg: String(e) });
+          return;
+        }
+      } else return;
+      let nTicks = 0;
+      nativeRx = startNativeReceiver(t, video, {
+        getKeys: () => padMask,
+        onStart: () => {
+          $("#wait").hidden = true;
+          $("#sound").hidden = true;
+          if (currentCall) { const c = currentCall; currentCall = null; try { c.close(); } catch (e) {} }
+          if (mse) { mse.stop(); mse = null; }
+          report("tv", "native-start", { code });
+        },
+        onStop: () => {
+          $("#wait").hidden = false;
+          $("#state").textContent = "Esperando al móvil…";
+          report("tv", "native-stop", { code });
+        },
+        onStats: st => {
+          $("#stat").textContent = `v${version} · nativo · ${st.res[0]}×${st.res[1]} · ${st.shown} fps · ${st.lag} ms`;
+          if (++nTicks % 20 === 5) report("tv", "native-tick", { code, ...st, t: undefined });
+        },
+      });
+      window.__mgsNative = nativeRx;
+      t.onMessage(m => {
+        if (m && m.t === "ping") t.send({ t: "hello", mse: nativeSupport(), viewport: [innerWidth, innerHeight, devicePixelRatio], v: version });
+        // Mensaje de receptor DashCast/URL Cast ("abre esta dirección"): ahora el
+        // receptor somos nosotros, así que lo hacemos nosotros.
+        else if (m && typeof m.url === "string" && /^https:\/\//.test(m.url)) location.href = m.url;
+      });
+    })();
 
     // Pitido al abrir: si se oye, la salida de audio de la tele funciona.
     if (!flags.has("noaudio")) beep().then(r => report("tv", "beep", { code, r }));

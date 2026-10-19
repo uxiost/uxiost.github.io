@@ -25,6 +25,9 @@ const SECONDS = Number(process.argv[3] || 45);
 const LG_BENCH_MS = 1350;
 let TV_CPU_SLOWDOWN = Number(process.env.TV_CPU || 0);
 const code = "lab" + Math.random().toString(36).slice(2, 7);
+// NATIVE=1: modo nativo (WebCodecs en el móvil → MSE en la tele) por un canal que
+// hace de sesión de Chromecast. Sin NATIVE: WebRTC, como hasta ahora.
+const NATIVE = !!process.env.NATIVE;
 
 // La "tele" limitada también en capacidad total de CPU (decodificador de vídeo y
 // compositor incluidos, que la ralentización de DevTools no toca), con un cgroup:
@@ -76,6 +79,28 @@ await tvCtx.addInitScript(() => {
   }
 });
 const tv = await tvCtx.newPage();
+const phoneCtx = await phoneBrowser.newContext({ viewport: { width: 915, height: 412 } });
+const phone = await phoneCtx.newPage();
+// Canal "sesión de Chromecast" entre las dos páginas: en orden y por lotes.
+function pipe(page, fn) {
+  const q = [];
+  let busy = false;
+  const flush = async () => {
+    if (busy || !q.length) return;
+    busy = true;
+    const batch = q.splice(0, q.length);
+    try { await page.evaluate(([fn, ms]) => ms.forEach(m => window[fn] && window[fn](m)), [fn, batch]); } catch (e) { /* página recargando */ }
+    busy = false;
+    flush();
+  };
+  return m => { q.push(m); flush(); };
+}
+const pipeStats = { toTv: 0, toPhone: 0, bytesToTv: 0 };
+if (NATIVE) {
+  const toTv = pipe(tv, "labNativeIn"), toPhone = pipe(phone, "labNativeFromTv");
+  await phone.exposeBinding("labToTv", (src, m) => { pipeStats.toTv++; pipeStats.bytesToTv += m.d ? m.d.length : 0; toTv(m); });
+  await tv.exposeBinding("labNativeOut", (src, m) => { pipeStats.toPhone++; toPhone(m); });
+}
 tv.on("pageerror", e => errors.push("TV " + e.message));
 const cdp = await tvCtx.newCDPSession(tv);
 if (!TV_CPU_SLOWDOWN) {
@@ -92,18 +117,18 @@ if (!TV_CPU_SLOWDOWN) {
   TV_CPU_SLOWDOWN = Math.max(1, Math.round(LG_BENCH_MS / bench * 10) / 10);
 }
 await cdp.send("Emulation.setCPUThrottlingRate", { rate: TV_CPU_SLOWDOWN });
-await tv.goto(BASE + "screen.html#" + code + (process.env.TV_FLAGS ? ";" + process.env.TV_FLAGS : ""));
+await tv.goto(BASE + "screen.html#" + code + (process.env.TV_FLAGS ? ";" + process.env.TV_FLAGS : "") + (NATIVE ? ";labnative" : ""));
 await tv.waitForFunction(() => document.querySelector("#state").textContent.includes("Esperando"), null, { timeout: 60000 });
 
 // ---- móvil simulado
-const phone = await (await phoneBrowser.newContext({ viewport: { width: 915, height: 412 } })).newPage();
 phone.on("pageerror", e => errors.push("PHONE " + e.message));
 // Móvil sobrecargado (emulador + calor): PHONE_CPU=3 lo ralentiza 3×.
 if (process.env.PHONE_CPU) {
   const pc = await phone.context().newCDPSession(phone);
   await pc.send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.PHONE_CPU) });
 }
-await phone.goto(BASE + "lab/phone.html" + (process.env.Q ? "?" + process.env.Q : "") + "#" + code);
+const phoneQuery = [process.env.Q, NATIVE && "native=1"].filter(Boolean).join("&");
+await phone.goto(BASE + "lab/phone.html" + (phoneQuery ? "?" + phoneQuery : "") + "#" + code);
 await phone.waitForFunction(() => window.labStatus && window.labStatus.some(s => s.includes("En la tele")), null, { timeout: 60000 });
 await phone.evaluate(() => window.startTone());
 
@@ -141,7 +166,11 @@ const steady = await tv.evaluate(async ([t0, t1]) => {
   const gaps = fr.slice(1).map((t, i) => t - fr[i]);
   const lat = window.__lab.lat.filter(([t]) => t >= t0 && t <= t1).map(([, l]) => l).sort((a, b) => a - b);
   const q = p => lat.length ? lat[Math.min(lat.length - 1, Math.floor(p * lat.length))] : null;
+  const big = [];
+  gaps.forEach((g, i) => { if (g > 200) big.push([Math.round(fr[i]), Math.round(g)]); });
+  const nlog = window.__mgsNative && window.__mgsNative.state ? window.__mgsNative.state.log : [];
   const out = {
+    gaps: big.map(([t, g]) => ({ at: t, ms: g, near: nlog.filter(([lt]) => lt > t - 1500 && lt < t + g + 200) })),
     shownFps: Math.round(fr.length / ((t1 - t0) / 1000) * 10) / 10,
     stalls200ms: gaps.filter(x => x > 200).length,
     worstGapMs: Math.round(Math.max(0, ...gaps)),
@@ -166,9 +195,20 @@ const tvStats = await tv.evaluate(async () => {
   });
   const m = window.__mgsAudio && window.__mgsAudio.mse;
   if (m) out.mse = m.info();
+  const n = window.__mgsNative;
+  if (n && n.state) {
+    const s = n.state;
+    out.native = { jumps: s.jumps, drops: s.drops || 0, err: s.err, appended: s.appended, muted: v.muted, paused: v.paused,
+      buffered: Object.fromEntries(Object.entries(s.tracks).map(([k, t]) => [k, t.sb && t.sb.buffered.length ? [t.sb.buffered.start(0), t.sb.buffered.end(t.sb.buffered.length - 1)].map(x => Math.round(x * 100) / 100) : null])),
+      currentTime: Math.round(v.currentTime * 100) / 100, quality: v.getVideoPlaybackQuality && (({ droppedVideoFrames, totalVideoFrames }) => ({ droppedVideoFrames, totalVideoFrames }))(v.getVideoPlaybackQuality()) };
+  }
   return out;
 });
 const phoneStats = await phone.evaluate(async () => {
+  if (window.labStream && window.labStream.stats) {
+    const s = window.labStream.stats;
+    return { native: true, level: window.labStream.level, codec: s.codec, audio: s.audio, withAudio: s.withAudio, sentFrames: s.sentFrames, dropped: s.dropped, flowDrops: s.flowDrops, msgs: s.msgs, encMs: s.encMs, err: s.err, aErr: s.aErr, sendErr: s.sendErr, pending: window.labStream.pending, tv: s.tv, status: window.labStatus.slice(-2) };
+  }
   const out = { level: window.labStream && window.labStream.level, tvFpsViaBack: window.labStream && window.labStream.tvFps, backSamples: window.labStream && window.labStream.tvSamples, status: window.labStatus.slice(-3) };
   const pcs = Object.values(window.labPeer.connections).flat().map(c => c.peerConnection).filter(Boolean);
   const pc = pcs.find(p => p.connectionState === "connected");
@@ -185,12 +225,18 @@ const phoneStats = await phone.evaluate(async () => {
 
 // Audio: ¿sale la señal por el reproductor multimedia de la tele?
 const audio = await tv.evaluate(async () => {
-  const m = window.__mgsAudio && window.__mgsAudio.mse;
+  let m = window.__mgsAudio && window.__mgsAudio.mse;
+  if (window.__mgsNative && window.__mgsNative.active) {
+    const v = document.querySelector("#video");
+    m = { el: v, info: () => ({ native: true, muted: v.muted, volume: v.volume }) };
+  }
   if (!m) return { route: "sin MSE" };
   const ctx = new AudioContext();
   await ctx.resume();
   const an = ctx.createAnalyser();
-  ctx.createMediaStreamSource(m.el.captureStream()).connect(an);
+  const cap = m.el.captureStream();
+  if (!cap.getAudioTracks().length) return { route: "sin pista de audio", ...m.info() };
+  ctx.createMediaStreamSource(cap).connect(an);
   const b = new Float32Array(2048);
   let peak = 0;
   for (let i = 0; i < 10; i++) { await new Promise(r => setTimeout(r, 100)); an.getFloatTimeDomainData(b); for (const x of b) peak = Math.max(peak, Math.abs(x)); }
@@ -218,13 +264,14 @@ for (let i = 0; i < 60; i++) {
 }
 
 const result = {
-  variant: [process.env.Q, process.env.TV_FLAGS, process.env.TV_720 && "720"].filter(Boolean).join(" ") || "default", base: BASE, tvCpuSlowdown: TV_CPU_SLOWDOWN, tvCores: cgroup ? TV_CORES : "sin límite", phoneCpuSlowdown: Number(process.env.PHONE_CPU || 1), seconds: SECONDS,
+  variant: [NATIVE && "native", process.env.Q, process.env.TV_FLAGS, process.env.TV_720 && "720"].filter(Boolean).join(" ") || "default", base: BASE, tvCpuSlowdown: TV_CPU_SLOWDOWN, tvCores: cgroup ? TV_CORES : "sin límite", phoneCpuSlowdown: Number(process.env.PHONE_CPU || 1), seconds: SECONDS,
+  native: NATIVE, pipe: NATIVE ? pipeStats : undefined,
   steady, tv: tvStats, phone: phoneStats, audio, tvRemoteKeys: tvRemote, recoverAfterFreezeMs: recoverMs,
   errors: errors.filter(e => !/Wake Lock/.test(e)),
 };
 // La tele se juzga por lo que recibe: debe pintar casi todo lo que el móvil envía
 // (si el móvil de pruebas no llega a 30 fps, es cosa de esta máquina, no de la tele).
-const sentFps = phoneStats.encFps || 30;
+const sentFps = phoneStats.encFps || (NATIVE ? 30 : 30);
 result.phoneLimited = phoneStats.limit && phoneStats.limit !== "none";
 const pass = {
   fps: steady.shownFps >= Math.min(25, sentFps * 0.85) && steady.shownFps >= 18,
