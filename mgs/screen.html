@@ -8,7 +8,7 @@
   <script>
     // Siempre la última versión: si la publicada no es la que se ha cargado
     // (caché del navegador o del service worker), se recarga una vez.
-    window.MGS_BUILD = "18";
+    window.MGS_BUILD = "19";
     (function () {
       if (MGS_BUILD.indexOf("__") === 0) return; // copia local de desarrollo
       fetch("version.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
@@ -24,8 +24,44 @@
       }).catch(function () {});
     })();
   </script>
+  <script>
+    // Abierta a pantalla completa por el receptor de Chromecast (;native): esta
+    // página pasa a ser la app receptora y debe arrancar el marco de receptor de
+    // Cast (CAF) cuanto antes, o el Chromecast la da por colgada. Los mensajes que
+    // lleguen antes de que cargue el resto se guardan (js/castrx.js los recoge).
+    (function () {
+      if (!/CrKey/.test(navigator.userAgent) || location.hash.split(";").indexOf("native") < 0) return;
+      var NS = ["urn:x-cast:com.madmod.dashcast", "urn:x-cast:com.url.cast"];
+      var early = window.__castEarly = { queue: [], ctx: null, err: null };
+      var s = document.createElement("script");
+      s.src = "https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js";
+      s.onerror = function () { early.err = "no carga CAF"; };
+      s.onload = function () {
+        try {
+          var ctx = cast.framework.CastReceiverContext.getInstance();
+          NS.forEach(function (n) {
+            ctx.addCustomMessageListener(n, function (ev) {
+              if (early.onMessage) early.onMessage(n, ev);
+              else if (early.queue.length < 50) early.queue.push({ ns: n, ev: ev });
+            });
+          });
+          var o = new cast.framework.CastReceiverOptions();
+          o.disableIdleTimeout = true;
+          o.skipPlayersLoad = true;
+          o.maxInactivity = 3600;
+          o.statusText = "MGS Web";
+          o.customNamespaces = {};
+          NS.forEach(function (n) { o.customNamespaces[n] = cast.framework.system.MessageType.JSON; });
+          ctx.start(o);
+          early.ctx = ctx;
+          if (early.onReady) early.onReady();
+        } catch (e) { early.err = String(e); if (early.onReady) early.onReady(); }
+      };
+      document.head.appendChild(s);
+    })();
+  </script>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=18">
+  <link rel="stylesheet" href="css/style.css?v=19">
   <style>
     [hidden] { display: none !important; }
     html, body { background: #000; height: 100%; overflow: hidden; }
@@ -393,6 +429,7 @@
       let nTicks = 0;
       nativeRx = startNativeReceiver(t, video, {
         getKeys: () => padMask,
+        noRate: flags.has("norate"),
         onStart: () => {
           $("#wait").hidden = true;
           $("#sound").hidden = true;

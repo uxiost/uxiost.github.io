@@ -273,10 +273,14 @@ const result = {
 // (si el móvil de pruebas no llega a 30 fps, es cosa de esta máquina, no de la tele).
 const sentFps = phoneStats.encFps || (NATIVE ? 30 : 30);
 result.phoneLimited = phoneStats.limit && phoneStats.limit !== "none";
+// En CI (GitHub) no hay cgroup y las dos "máquinas" comparten una CPU ruidosa:
+// umbrales más holgados (se indica en el resultado) que siguen cazando roturas.
+const relaxed = !!process.env.CI;
+result.relaxed = relaxed;
 const pass = {
-  fps: steady.shownFps >= Math.min(25, sentFps * 0.85) && steady.shownFps >= 18,
-  latency: steady.latencyMs.p95 != null && steady.latencyMs.p95 <= (result.phoneLimited ? 300 : 200),
-  stalls: steady.stalls200ms <= (result.phoneLimited ? 4 : 1),
+  fps: steady.shownFps >= Math.min(relaxed ? 20 : 25, sentFps * (relaxed ? 0.7 : 0.85)) && steady.shownFps >= (relaxed ? 14 : 18),
+  latency: steady.latencyMs.p95 != null && steady.latencyMs.p95 <= (result.phoneLimited || relaxed ? 300 : 200),
+  stalls: steady.stalls200ms <= (result.phoneLimited || relaxed ? 5 : 1),
   audio: audio.peak > 0.1,
   recovery: recoverMs != null && recoverMs <= 8000,
   tvRemote: tvRemote.includes(1 << 7) && tvRemote[tvRemote.length - 1] === 0,

@@ -1,13 +1,13 @@
 // Consola: ejecuta el emulador de PS1 (EmulatorJS, núcleo PCSX-ReARMed en
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
-import * as store from "./storage.js?v=18";
-import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=18";
-import { attachTouchPad, PAD_HTML } from "./padui.js?v=18";
-import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=18";
-import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=18";
-import { startNative } from "./native.js?v=18";
-import { report } from "./diag.js?v=18";
+import * as store from "./storage.js?v=19";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=19";
+import { attachTouchPad, PAD_HTML } from "./padui.js?v=19";
+import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=19";
+import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=19";
+import { startNative } from "./native.js?v=19";
+import { report } from "./diag.js?v=19";
 
 // Antes de que arranque el emulador: así podemos mandar su audio a la tele.
 installAudioTap();

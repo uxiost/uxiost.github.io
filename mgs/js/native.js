@@ -16,10 +16,9 @@
 //   tele → móvil  {t:"keys", k}                 botones del mando de la tele, al cambiar
 //   tele → móvil  {t:"key"}                     pide una imagen clave
 
-import { initSegment, fragment, mimeFor, toB64, fromB64 } from "./fmp4.js?v=18";
+import { initSegment, fragment, mimeFor, toB64, fromB64 } from "./fmp4.js?v=19";
 
 const CHUNK = 45000; // bytes por mensaje antes de base64 (Cast: máx. 64 KB por mensaje)
-const V_DUR = 0.3;   // duración declarada de cada imagen (s), ver más abajo
 
 // ---------------------------------------------------------------- tele
 
@@ -159,6 +158,7 @@ export function startNativeReceiver(transport, video, opts = {}) {
       s.waitKey = false;
     }
     tr.segs = (tr.segs || 0) + 1;
+    if (m.vd) tr.extra = m.vd;
     tr.queue.push({ bytes, key: !!m.key, ts: m.ts });
     pump(s, tr);
   };
@@ -218,7 +218,9 @@ export function startNativeReceiver(transport, video, opts = {}) {
     } else {
       // Un poco por detrás: alcanzar el directo acelerando un poco (el audio va
       // adelantado, así que no se queda sin datos), sin saltos ni cortes.
-      const want = lag > target + 0.06 ? Math.min(1.1, 1 + (lag - target) * 0.5) : lag < target + 0.02 ? 1 : video.playbackRate;
+      // Con el mínimo del último segundo: el retraso instantáneo sube y baja con
+      // cada imagen que llega y haría oscilar la velocidad.
+      const want = opts.noRate ? 1 : minLag > target + 0.06 ? Math.min(1.1, 1 + (minLag - target) * 0.5) : minLag < target + 0.02 ? 1 : video.playbackRate;
       if (Math.abs(video.playbackRate - want) > 0.01) { video.playbackRate = want; s.rateChanges = (s.rateChanges || 0) + 1; }
     }
     s.target = target;
@@ -226,8 +228,10 @@ export function startNativeReceiver(transport, video, opts = {}) {
     if (video.paused) video.play().catch(() => {});
     for (const tr of Object.values(s.tracks)) {
       const b = tr.sb.buffered;
-      if (!tr.sb.updating && b.length && video.currentTime - b.start(0) > 6) {
-        try { tr.sb.remove(0, video.currentTime - 3); note("remove", tr.k); } catch (e) { /* luego */ }
+      // Borrar lo ya visto de tarde en tarde (borrar mientras suena puede dar un
+      // tirón): al pasar de 30 s, se dejan los últimos 10.
+      if (!tr.sb.updating && b.length && video.currentTime - b.start(0) > 30) {
+        try { tr.sb.remove(0, video.currentTime - 10); note("remove", tr.k); } catch (e) { /* luego */ }
       }
     }
   }, 100);
@@ -279,29 +283,34 @@ export function startNativeReceiver(transport, video, opts = {}) {
 // ---------------------------------------------------------------- móvil
 
 // Elige códecs según lo que admite la tele y lo que sabe codificar este móvil.
+// Con codificador por hardware, a la resolución pedida; si solo lo hay por
+// software (gasta la misma CPU que necesita el emulador), a 640×480.
 export async function pickCodecs(tvSupport, { width, height, fps, kbps }) {
   const venc = typeof VideoEncoder !== "undefined" ? VideoEncoder : null;
   const aenc = typeof AudioEncoder !== "undefined" ? AudioEncoder : null;
   let video = null, audio = null;
-  const tryV = async (codec, kind, extra = {}) => {
+  const tryV = async (codec, kind, w, h, extra = {}) => {
     if (!venc) return false;
     try {
-      const cfg = { codec, width, height, bitrate: kbps * 1000, framerate: fps, latencyMode: "realtime", ...extra };
+      const cfg = { codec, width: w, height: h, bitrate: kbps * 1000, framerate: fps, latencyMode: "realtime", ...extra };
       const r = await venc.isConfigSupported(cfg);
-      if (r.supported) { video = { kind, codecString: codec, cfg }; return true; }
+      if (r.supported) { video = { kind, codecString: codec, cfg, width: w, height: h, hw: extra.hardwareAcceleration === "prefer-hardware" }; return true; }
     } catch (e) { /* no */ }
     return false;
   };
   const avc = { avc: { format: "avc" } };
-  if (tvSupport.h264main) {
-    (await tryV("avc1.4D401F", "avc1", { ...avc, hardwareAcceleration: "prefer-hardware" }))
-      || (await tryV("avc1.4D401F", "avc1", avc));
+  const candidates = [
+    tvSupport.h264main && ["avc1.4D401F", "avc1", avc],
+    tvSupport.h264 && ["avc1.42E01F", "avc1", avc],
+    tvSupport.vp9 && ["vp09.00.10.08", "vp09", {}],
+  ].filter(Boolean);
+  for (const [codec, kind, extra] of candidates) {
+    if (await tryV(codec, kind, width, height, { ...extra, hardwareAcceleration: "prefer-hardware" })) break;
   }
-  if (!video && tvSupport.h264) {
-    (await tryV("avc1.42E01F", "avc1", { ...avc, hardwareAcceleration: "prefer-hardware" }))
-      || (await tryV("avc1.42E01F", "avc1", avc));
+  const swH = Math.min(height, 480), swW = Math.round(swH * width / height / 16) * 16;
+  for (const [codec, kind, extra] of video ? [] : candidates) {
+    if (await tryV(codec, kind, swW, swH, extra)) break;
   }
-  if (!video && tvSupport.vp9) await tryV("vp09.00.10.08", "vp09");
   const tryA = async (codec, kind) => {
     if (!aenc) return false;
     try {
@@ -355,7 +364,7 @@ export function startNativeSender(opts) {
     if (audioWanted && !aInit && performance.now() - firstVideoAt.t < 1500) return;
     started = true;
     stats.withAudio = !!aInit;
-    send({ t: "start", id, v: vInit, a: aInit, vDur: V_DUR });
+    send({ t: "start", id, v: vInit, a: aInit });
     needKey = true;
   };
 
@@ -379,13 +388,10 @@ export function startNativeSender(opts) {
       const t90 = Math.round(chunk.timestamp * 0.09);
       stats.vTs = Math.round(chunk.timestamp / 1000);
       stats.nowTs = Math.round(nowUs() - t0) / 1000 | 0;
-      // Duración declarada larga a propósito: el reproductor da por cortado el
-      // vídeo (y tira todo hasta la siguiente imagen clave) si entre dos imágenes
-      // pasa más del doble de la duración de la anterior, y el emulador no entrega
-      // las imágenes con regularidad perfecta. La tele lo descuenta (vDur).
-      const dur = Math.round(V_DUR * 90000);
+      const dur = Math.round((chunk.duration || 1e6 / fps) * 0.09); // ver durFor()
       const key = chunk.type === "key";
-      sendBytes("v", ++vSeq, fragment(videoTrack, vSeq, t90, [{ data, duration: dur, key }]), key ? { key: 1, ts: t90 / 90000 } : undefined);
+      // vd: duración declarada (la tele la descuenta al medir su retraso).
+      sendBytes("v", ++vSeq, fragment(videoTrack, vSeq, t90, [{ data, duration: dur, key }]), key ? { key: 1, ts: t90 / 90000, vd: dur / 90000 } : { vd: dur / 90000 });
       stats.sentFrames++;
     },
     error: e => { stats.err = String(e); },
@@ -401,19 +407,37 @@ export function startNativeSender(opts) {
     if (key) needKey = false;
     lastVideoAt = performance.now();
   };
-  // Si el lienzo no cambia (pausa, pantalla fija), el lienzo no da fotogramas y la
-  // tele se quedaría sin vídeo: repetimos el último.
+  // Duración declarada de cada imagen: algo más que el ritmo real (media de los
+  // huecos × 1,5). El reproductor da por cortado el vídeo, y tira todo hasta la
+  // siguiente imagen clave, si entre dos imágenes pasa más del doble de la
+  // duración declarada de la anterior, y el emulador no entrega las imágenes con
+  // regularidad perfecta. Si aun así llega un hueco mayor, esa imagen sale como
+  // imagen clave y no se pierde nada. (Declarar mucho más, p. ej. 0,3 s, hace que
+  // Chrome pinte menos imágenes de las que recibe.)
+  let gapEma = 1e6 / fps, lastDur = 1e6 / fps;
+  const durFor = ts => {
+    if (lastTs >= 0) {
+      const gap = ts - lastTs;
+      if (gap > lastDur * 1.9) { needKey = true; stats.gapKeys = (stats.gapKeys || 0) + 1; }
+      gapEma = gapEma * 0.9 + Math.min(gap, 200000) * 0.1;
+    }
+    lastTs = ts;
+    lastDur = Math.round(Math.min(150000, Math.max(1e6 / fps, gapEma * 1.5)));
+    return lastDur;
+  };
+  // Si el lienzo no cambia (pausa, pantalla fija) no da fotogramas y la tele se
+  // quedaría sin vídeo; si el emulador da un tirón, el hueco cortaría el vídeo:
+  // en ambos casos se repite la última imagen.
   let lastSrc = null, lastVideoAt = performance.now();
   const vPacer = setInterval(() => {
-    if (stopped || !lastSrc || !started || performance.now() - lastVideoAt < 250 || venc.encodeQueueSize > 2) return;
+    if (stopped || !lastSrc || !started || venc.encodeQueueSize > 2) return;
+    if (performance.now() - lastVideoAt < Math.max(60, lastDur / 1000 * 1.4)) return;
     const ts = nowUs() - t0;
-    if (ts - lastTs < 1e6 / fps * 0.85) return;
-    lastTs = ts;
-    const f = new VideoFrame(lastSrc, { timestamp: ts, duration: 1e6 / fps });
+    const f = new VideoFrame(lastSrc, { timestamp: ts, duration: durFor(ts) });
     encodeFrame(f);
     f.close();
     stats.repeats = (stats.repeats || 0) + 1;
-  }, 100);
+  }, 20);
 
   // Fotogramas del lienzo: un procesador de pistas los entrega sin bloquear la página.
   let canvas = null, capTrack = null, reader = null;
@@ -436,6 +460,7 @@ export function startNativeSender(opts) {
       const { value: frame, done } = await myReader.read();
       if (done) { if (myReader === reader) reader = null; continue; }
       if (stopped) { frame.close(); break; }
+      stats.framesIn = (stats.framesIn || 0) + 1;
       // fps objetivo, cola del codificador y control de flujo: si algo se atasca,
       // se descarta la imagen en lugar de acumular retraso.
       const now = nowUs();
@@ -446,18 +471,16 @@ export function startNativeSender(opts) {
       if (lastTs >= 0 && ts - lastTs < minGap) { frame.close(); continue; }
       if (venc.encodeQueueSize > 2) { frame.close(); stats.dropped++; continue; }
       if (pending > 40) { frame.close(); stats.flowDrops++; needKey = true; continue; }
-      // Tras un hueco (página congelada, pestaña oculta) la tele necesita una imagen clave.
-      if (lastTs >= 0 && ts - lastTs > V_DUR * 1.6e6) needKey = true;
-      lastTs = ts;
+      const dur = durFor(ts);
       let src;
       if (frame.displayWidth !== width || frame.displayHeight !== height) {
         // Reescalar (en la GPU) al tamaño del codificador.
         scaler = scaler || new OffscreenCanvas(width, height);
         const g = scaler.getContext("2d");
         g.drawImage(frame, 0, 0, width, height);
-        src = new VideoFrame(scaler, { timestamp: ts, duration: 1e6 / fps });
+        src = new VideoFrame(scaler, { timestamp: ts, duration: dur });
       } else {
-        src = new VideoFrame(frame, { timestamp: ts, duration: 1e6 / fps });
+        src = new VideoFrame(frame, { timestamp: ts, duration: dur });
       }
       frame.close();
       encodeFrame(src);
@@ -497,8 +520,8 @@ export function startNativeSender(opts) {
         chunk.copyTo(data);
         const k = rate / 1e6;
         batch.push({ data, t: Math.round(ts * k), duration: Math.max(1, Math.round((chunk.duration || 0) * k)), key: true });
-        // ~40 ms por mensaje: poco retraso sin saturar de mensajes.
-        if (batch.reduce((a, s) => a + s.duration, 0) >= rate * 0.04) {
+        // ~60 ms por mensaje: pocos mensajes (el audio va adelantado, no añade retraso).
+        if (batch.reduce((a, s) => a + s.duration, 0) >= rate * 0.06) {
           const samples = batch.splice(0, batch.length);
           sendBytes("a", ++aSeq, fragment(audioTrackInfo, aSeq, samples[0].t, samples));
         }
@@ -634,6 +657,7 @@ export async function startNative(transport, opts) {
   const width = opts.width || 960, height = opts.height || 720, fps = opts.fps || 30;
   let level = NATIVE_START;
   const codecs = await pickCodecs(hello.mse || {}, { width, height, fps, kbps: NATIVE_KBPS[level] });
+  if (codecs.video && !codecs.video.hw) level = Math.max(level, 3); // 640×480: menos caudal
   report("phone", "native-hello", { mse: hello.mse, viewport: hello.viewport, tvV: hello.v, video: codecs.video && codecs.video.codecString, audio: codecs.audio && codecs.audio.kind });
   if (!codecs.video) return null;
   // Esperar a que el juego esté en marcha (lienzo) y, un poco, a su sonido.
@@ -644,19 +668,24 @@ export async function startNative(transport, opts) {
   if (!alive()) return null;
   const audioTrack = opts.getAudioTrack ? opts.getAudioTrack() : null;
   const sender = startNativeSender({
-    getCanvas: opts.getCanvas, audioTrack, transport, codecs, width, height, fps, kbps: NATIVE_KBPS[level],
+    getCanvas: opts.getCanvas, audioTrack, transport, codecs, width: codecs.video.width, height: codecs.video.height, fps, kbps: NATIVE_KBPS[level],
     onTvKeys: opts.onTvKeys, audioLeadMs: opts.audioLeadMs,
     onStats: (tv, st) => adapt(tv, st),
   });
   // Ajuste de caudal: baja si la tele no pinta lo que llega o se acumula retraso;
   // sube despacio si va holgada.
   let bad = 0, good = 0, lastChange = Date.now(), lastJumps = 0, lastDrops = 0, ticks = 0;
+  let lastSent = 0, lastAt = Date.now();
   const adapt = (tv, st) => {
     ticks++;
     sender.lastTvStatsAt = Date.now();
     const jumps = (tv.jumps || 0) - lastJumps, drops = (tv.drops || 0) - lastDrops;
     lastJumps = tv.jumps || 0; lastDrops = tv.drops || 0;
-    const struggling = tv.shown < fps * 0.8 || jumps > 0 || drops > 0 || st.pending > 20;
+    // La tele se juzga por lo que recibe (si el emulador va a 20 fps, no es culpa suya).
+    const sentFps = (st.sentFrames - lastSent) / Math.max(0.5, (Date.now() - lastAt) / 1000);
+    lastSent = st.sentFrames; lastAt = Date.now();
+    st.sentFps = Math.round(sentFps * 10) / 10;
+    const struggling = tv.shown < Math.min(fps, sentFps) * 0.8 || jumps > 0 || drops > 0 || st.pending > 20;
     if (struggling) { bad++; good = 0; } else { good++; bad = 0; }
     const since = Date.now() - lastChange;
     if (bad >= 3 && level < NATIVE_KBPS.length - 1 && since > 4000) {
@@ -667,9 +696,9 @@ export async function startNative(transport, opts) {
       sender.setBitrate(NATIVE_KBPS[level]);
     }
     if (ticks % 20 === 5) {
-      report("phone", "native-tick", { level, kbps: NATIVE_KBPS[level], sent: st.sentFrames, dropped: st.dropped, flowDrops: st.flowDrops, pending: st.pending, msgs: st.msgs, enc: st.encMs, err: st.err, aErr: st.aErr, sendErr: st.sendErr, withAudio: st.withAudio, nv: st.nv, na: st.na, repeats: st.repeats, aFilled: st.aFilled, aSkipped: st.aSkipped, vTs: st.vTs, aTs: st.aTs, nowTs: st.nowTs, tv: { ...tv, t: undefined } });
+      report("phone", "native-tick", { level, kbps: NATIVE_KBPS[level], sent: st.sentFrames, dropped: st.dropped, flowDrops: st.flowDrops, pending: st.pending, msgs: st.msgs, enc: st.encMs, err: st.err, aErr: st.aErr, sendErr: st.sendErr, withAudio: st.withAudio, sentFps: st.sentFps, hw: codecs.video.hw, nv: st.nv, na: st.na, repeats: st.repeats, aFilled: st.aFilled, aSkipped: st.aSkipped, vTs: st.vTs, aTs: st.aTs, nowTs: st.nowTs, tv: { ...tv, t: undefined } });
     }
-    if (opts.onStatus) opts.onStatus(`En la tele ✓ · ${height}p ${fps} fps · ${Math.round(NATIVE_KBPS[level] / 100) / 10} Mbps · por hardware`, true);
+    if (opts.onStatus) opts.onStatus(`En la tele ✓ · directo ${codecs.video.height}p · ${Math.round(tv.shown)} fps · ${Math.round(NATIVE_KBPS[level] / 100) / 10} Mbps`, true);
   };
   sender.hello = hello;
   sender.lastTvStatsAt = Date.now();
