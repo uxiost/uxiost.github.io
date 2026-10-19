@@ -10,14 +10,18 @@
 //   readable: el ReadableStream de un MediaStreamTrackProcessor (de vídeo o de audio)
 //   message: {t:"pending", n} {t:"key"} {t:"restart"} {t:"bitrate", kbps} {t:"stop"}
 
-import { initSegment, fragment, mimeFor, toB64 } from "./fmp4.js?v=22";
+import { initSegment, fragment, mimeFor, toB64 } from "./fmp4.js?v=23";
 
-const CHUNK = 45000; // bytes por mensaje antes de base64 (Cast: máx. 64 KB por mensaje)
+// Bytes por mensaje antes de base64. En la LG real, los mensajes de ~60 KB los
+// rechazaba el Chromecast ("invalid_parameter") y se perdían imágenes clave: se
+// usan trozos pequeños, y si aun así rechaza alguno, se encogen solos.
+const CHUNK = 12000, MIN_CHUNK = 3000;
 
 export function createSender(cfg, emit) {
   const { id, codecs, width, height } = cfg;
   const fps = cfg.fps || 30;
   let kbps = cfg.kbps || 3000;
+  let chunk = cfg.chunk || CHUNK;
   let stopped = false;
   let needKey = true;
   let vSeq = 0, aSeq = 0;
@@ -29,8 +33,8 @@ export function createSender(cfg, emit) {
 
   const send = obj => { stats.msgs++; emit({ t: "send", obj }); };
   const sendBytes = (k, n, bytes, extra) => {
-    const of = Math.ceil(bytes.length / CHUNK);
-    for (let i = 0; i < of; i++) send({ t: "seg", id, k, n, i, of, ...extra, d: toB64(bytes.subarray(i * CHUNK, (i + 1) * CHUNK)) });
+    const of = Math.ceil(bytes.length / chunk);
+    for (let i = 0; i < of; i++) send({ t: "seg", id, k, n, i, of, ...extra, d: toB64(bytes.subarray(i * chunk, (i + 1) * chunk)) });
     stats.bytes += bytes.length;
     stats["n" + k] = (stats["n" + k] || 0) + 1;
   };
@@ -276,6 +280,14 @@ export function createSender(cfg, emit) {
     message(m) {
       if (m.t === "pending") pending = m.n;
       else if (m.t === "key") needKey = true;
+      else if (m.t === "sendfail") {
+        // La tele no recibió un trozo: más pequeños a partir de ahora y una imagen
+        // clave para que no siga con un hueco.
+        chunk = Math.max(MIN_CHUNK, Math.floor(chunk * 0.6));
+        stats.chunk = chunk;
+        stats.sendFails = (stats.sendFails || 0) + 1;
+        needKey = true;
+      }
       else if (m.t === "restart" && started) {
         // La tele soltó esta emisión: volver a mandar el inicio y una imagen clave.
         started = false;

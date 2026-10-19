@@ -16,7 +16,7 @@
 //   tele → móvil  {t:"keys", k}                 botones del mando de la tele, al cambiar
 //   tele → móvil  {t:"key"}                     pide una imagen clave
 
-import { fromB64 } from "./fmp4.js?v=22";
+import { fromB64 } from "./fmp4.js?v=23";
 
 
 // ---------------------------------------------------------------- tele
@@ -121,7 +121,7 @@ export function startNativeReceiver(transport, video, opts = {}) {
     }
   };
 
-  let lastRestartAsk = 0;
+  let lastRestartAsk = 0, selfRestarts = 0;
   const onSeg = m => {
     const s = cur;
     if (!s || s.id !== m.id) {
@@ -133,6 +133,18 @@ export function startNativeReceiver(transport, video, opts = {}) {
     s.lastSegAt = performance.now();
     const tr = s.tracks[m.k];
     if (!tr) return;
+    // ¿Se perdió algo? (un mensaje que el Chromecast no entregó): en vídeo, lo que
+    // venga después no se puede decodificar hasta la próxima imagen clave.
+    const lost = () => {
+      s.lost = (s.lost || 0) + 1;
+      if (m.k === "v") { s.waitKey = true; transport.send({ t: "key" }); }
+    };
+    if (tr.lastN != null && m.n > tr.lastN + 1) lost();
+    for (const pid of Object.keys(parts)) {
+      // Trozos de una imagen anterior que ya no van a completarse.
+      if (pid[0] === m.k && Number(pid.slice(1)) < m.n - 2) { delete parts[pid]; lost(); }
+    }
+    if (tr.lastN == null || m.n > tr.lastN) tr.lastN = m.n;
     let bytes;
     if (m.of > 1) {
       const id = m.k + m.n;
@@ -205,6 +217,22 @@ export function startNativeReceiver(transport, video, opts = {}) {
       return;
     }
     const now = performance.now();
+    // ¿Atascada? (la imagen no avanza aunque hay datos por delante): primero se
+    // salta a la siguiente imagen clave; si sigue igual, se empieza de nuevo (el
+    // móvil vuelve a mandar el inicio al ver que la tele pide "restart").
+    if (Math.abs(video.currentTime - (s.lastCt ?? -1)) > 0.01) { s.lastCt = video.currentTime; s.ctMovedAt = now; s.stuck = 0; }
+    else if (!video.paused && now - (s.ctMovedAt || now) > 2500 && r.end - video.currentTime > 0.5) {
+      s.ctMovedAt = now;
+      s.stuck = (s.stuck || 0) + 1;
+      if (s.stuck === 1) { note("stuck-jump"); s.wantJump = true; transport.send({ t: "key" }); }
+      else {
+        note("stuck-restart");
+        selfRestarts++;
+        teardown();
+        if (opts.onStop) opts.onStop();
+        return;
+      }
+    }
     if (now - lastStall > 10000 && target > 0.08) { target = Math.max(0.08, target - 0.01); lastStall = now - 9000; }
     const lag = r.end - video.currentTime;
     lagHist.push(lag);
@@ -278,7 +306,7 @@ export function startNativeReceiver(transport, video, opts = {}) {
       dec: dec == null ? null : Math.round(dec * 10) / 10, adv: Math.round(adv * 100) / 100,
       lag: r ? Math.round((r.end - video.currentTime) * 1000) : null,
       dropped: q.droppedVideoFrames, rs: video.readyState, paused: video.paused, muted: video.muted,
-      res: [video.videoWidth, video.videoHeight], jumps: s.jumps, drops: s.drops || 0, stalls: s.stalls || 0, target: Math.round(target * 1000), rate: Math.round(video.playbackRate * 100) / 100, rateChanges: s.rateChanges || 0,
+      res: [video.videoWidth, video.videoHeight], jumps: s.jumps, drops: s.drops || 0, stalls: s.stalls || 0, lost: s.lost || 0, restarts: selfRestarts, target: Math.round(target * 1000), rate: Math.round(video.playbackRate * 100) / 100, rateChanges: s.rateChanges || 0,
       err: s.err || (video.error ? "media " + video.error.code + " " + video.error.message : undefined),
       keys: opts.getKeys ? opts.getKeys() : 0, ends, ct: Math.round(video.currentTime * 1000), qs, segs, ranges: s.tracks.v && s.tracks.v.sb ? s.tracks.v.sb.buffered.length : 0,
     };
@@ -356,7 +384,14 @@ export function startNativeSender(opts) {
   const send = obj => {
     let p;
     try { p = transport.send(obj); } catch (e) { stats.sendErr = String(e); return; }
-    if (p && p.then) { pending++; p.then(() => pending--, e => { pending--; stats.sendErr = String(e && e.message || e); }); }
+    if (p && p.then) {
+      pending++;
+      p.then(() => pending--, e => {
+        pending--;
+        stats.sendErr = String(e && e.message || e);
+        if (obj.t === "seg") toSender({ t: "sendfail", k: obj.k, len: obj.d.length });
+      });
+    }
   };
   const onEmit = m => {
     if (m.t === "send") { if (!stopped) send(m.obj); }
@@ -430,6 +465,8 @@ export function startNativeSender(opts) {
     get kbps() { return kbps; },
     setBitrate(k) { kbps = k; toSender({ t: "bitrate", kbps: k }); },
     mute(on) { send({ t: "mute", on }); },
+    // Vuelve a empezar en la tele (inicio + imagen clave) sin cortar el envío.
+    restart() { stats.restarts = (stats.restarts || 0) + 1; toSender({ t: "restart" }); },
     stop(tellTv = true) {
       if (stopped) return;
       toSender({ t: "stop" });

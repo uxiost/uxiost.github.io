@@ -95,10 +95,16 @@ function pipe(page, fn) {
   };
   return m => { q.push(m); flush(); };
 }
-const pipeStats = { toTv: 0, toPhone: 0, bytesToTv: 0 };
+const pipeStats = { toTv: 0, toPhone: 0, bytesToTv: 0, rejected: 0 };
+// Tamaño máximo de mensaje de la "sesión de Chromecast" (la LG rechazó los de ~60 KB).
+const MSG_LIMIT = Number(process.env.MSG_LIMIT || 32768);
 if (NATIVE) {
   const toTv = pipe(tv, "labNativeIn"), toPhone = pipe(phone, "labNativeFromTv");
-  await phone.exposeBinding("labToTv", (src, m) => { pipeStats.toTv++; pipeStats.bytesToTv += m.d ? m.d.length : 0; toTv(m); });
+  await phone.exposeBinding("labToTv", (src, m) => {
+    // Como el Chromecast de la LG: rechaza los mensajes grandes ("invalid_parameter").
+    if (JSON.stringify(m).length > MSG_LIMIT) { pipeStats.rejected++; throw new Error("invalid_parameter"); }
+    pipeStats.toTv++; pipeStats.bytesToTv += m.d ? m.d.length : 0; toTv(m);
+  });
   await tv.exposeBinding("labNativeOut", (src, m) => { pipeStats.toPhone++; toPhone(m); });
 }
 tv.on("pageerror", e => errors.push("TV " + e.message));

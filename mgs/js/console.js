@@ -1,13 +1,13 @@
 // Consola: ejecuta el emulador de PS1 (EmulatorJS, núcleo PCSX-ReARMed en
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
-import * as store from "./storage.js?v=22";
-import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=22";
-import { attachTouchPad, PAD_HTML } from "./padui.js?v=22";
-import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=22";
-import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=22";
-import { startNative, tvShowing } from "./native.js?v=22";
-import { report } from "./diag.js?v=22";
+import * as store from "./storage.js?v=23";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=23";
+import { attachTouchPad, PAD_HTML } from "./padui.js?v=23";
+import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=23";
+import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=23";
+import { startNative, tvShowing } from "./native.js?v=23";
+import { report } from "./diag.js?v=23";
 
 // Antes de que arranque el emulador: así podemos mandar su audio a la tele.
 installAudioTap();
@@ -872,7 +872,7 @@ async function tryNative(cast, tvCode) {
   applySound();
   report("phone", "native-on", { tv: tvCode, codec: sender.stats.codec, audio: sender.stats.audio });
   const t0 = Date.now();
-  let blind = 0;
+  let blind = 0, everShown = false, restarts = [];
   const fallback = why => {
     if (tvNative !== sender) return;
     report("phone", "native-fallback", { tv: tvCode, why, stats: { ...sender.stats, tv: undefined }, tvStats: sender.stats.tv });
@@ -886,8 +886,19 @@ async function tryNative(cast, tvCode) {
     const visible = document.visibilityState === "visible";
     if (visible && gameCanvas() && Date.now() - sender.lastTvStatsAt > 10000) return fallback("sin respuesta de la tele");
     const tv = st.tv;
+    if (tvShowing(tv)) everShown = true;
     if (visible && gameCanvas() && Date.now() - t0 > 8000 && !tvShowing(tv)) blind++; else blind = 0;
-    if (blind >= 4) fallback("la tele no muestra imagen: " + (tv && tv.err || "sin fotogramas"));
+    if (blind < 3) return;
+    blind = 0;
+    // Si ya se vio en la tele, el envío directo funciona en esta tele: se reinicia
+    // (WebRTC puede ni conectar en esta red). Solo si nunca se vio, o si reiniciar
+    // no sirve, se pasa a WebRTC.
+    restarts = restarts.filter(t => Date.now() - t < 60000);
+    if (everShown && restarts.length < 3) {
+      restarts.push(Date.now());
+      report("phone", "native-restart", { tv: tvCode, n: restarts.length, tvStats: tv });
+      sender.restart();
+    } else fallback("la tele no muestra imagen: " + (tv && tv.err || "sin fotogramas"));
   }, 2000);
   setTimeout(() => {
     if (tvNative !== sender || !tvShowing(sender.stats.tv)) return;
