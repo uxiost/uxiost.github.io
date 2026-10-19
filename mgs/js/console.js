@@ -1,13 +1,13 @@
 // Consola: ejecuta el emulador de PS1 (EmulatorJS, núcleo PCSX-ReARMed en
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
-import * as store from "./storage.js?v=19";
-import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=19";
-import { attachTouchPad, PAD_HTML } from "./padui.js?v=19";
-import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=19";
-import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=19";
-import { startNative } from "./native.js?v=19";
-import { report } from "./diag.js?v=19";
+import * as store from "./storage.js?v=20";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=20";
+import { attachTouchPad, PAD_HTML } from "./padui.js?v=20";
+import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=20";
+import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=20";
+import { startNative } from "./native.js?v=20";
+import { report } from "./diag.js?v=20";
 
 // Antes de que arranque el emulador: así podemos mandar su audio a la tele.
 installAudioTap();
@@ -799,6 +799,12 @@ function applySound() {
   setLocalMuted(onTv);
   if (tvNative) tvNative.mute(!onTv);
 }
+
+// Escala del lienzo de 960×720 dentro de la zona de juego (ver style.css).
+new ResizeObserver(() => {
+  const g = $("#game");
+  if (g.clientWidth) g.style.setProperty("--tvs", String(g.clientWidth / 960));
+}).observe($("#game"));
 
 const gameCanvas = () => (started && window.EJS_emulator && window.EJS_emulator.started ? window.EJS_emulator.canvas : null);
 

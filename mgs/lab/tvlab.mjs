@@ -157,9 +157,14 @@ await tv.evaluate(async base => {
 
 async function window_(page, ms) { await page.waitForTimeout(ms); }
 await window_(tv, 8000); // calentamiento
+const sentNow = () => phone.evaluate(() => [performance.now(), window.labStream && window.labStream.stats ? window.labStream.stats.sentFrames : null]);
+const s0 = await sentNow();
 const t0 = await tv.evaluate(() => performance.now());
 await window_(tv, SECONDS * 1000);
 const t1 = await tv.evaluate(() => performance.now());
+const s1 = await sentNow();
+// Envío directo: fps que de verdad mandó el móvil en la ventana medida.
+const nativeSentFps = s0[1] != null ? Math.round((s1[1] - s0[1]) / ((s1[0] - s0[0]) / 1000) * 10) / 10 : null;
 
 const steady = await tv.evaluate(async ([t0, t1]) => {
   const fr = window.__lab.frames.filter(t => t >= t0 && t <= t1);
@@ -271,7 +276,8 @@ const result = {
 };
 // La tele se juzga por lo que recibe: debe pintar casi todo lo que el móvil envía
 // (si el móvil de pruebas no llega a 30 fps, es cosa de esta máquina, no de la tele).
-const sentFps = phoneStats.encFps || (NATIVE ? 30 : 30);
+const sentFps = phoneStats.encFps || nativeSentFps || 30;
+result.sentFps = sentFps;
 result.phoneLimited = phoneStats.limit && phoneStats.limit !== "none";
 // En CI (GitHub) no hay cgroup y las dos "máquinas" comparten una CPU ruidosa:
 // umbrales más holgados (se indica en el resultado) que siguen cazando roturas.

@@ -81,9 +81,14 @@ for (let i = 0; i < 6; i++) {
 }
 const after = await fpsBetween(10000);
 const resAfter = await tv.evaluate(() => [document.querySelector("#video").videoWidth, document.querySelector("#video").videoHeight]);
+const emuFps = await phone.evaluate(async () => {
+  const a = [performance.now(), window.EJS_emulator.gameManager.getFrameNum()];
+  await new Promise(r => setTimeout(r, 3000));
+  return Math.round((window.EJS_emulator.gameManager.getFrameNum() - a[1]) / ((performance.now() - a[0]) / 1000));
+});
 const phoneInfo = await phone.evaluate(() => ({ body: document.body.className, tvState: document.querySelector("#tvState").textContent, canvas: [window.EJS_emulator.canvas.width, window.EJS_emulator.canvas.height] }));
 
-const result = { tvFpsBefore: before, resBefore, tvFpsAfterGamepad: after, resAfter, phone: phoneInfo, errors: errors.filter(e => !/Wake Lock/.test(e)) };
+const result = { emuFps, tvFpsBefore: before, resBefore, tvFpsAfterGamepad: after, resAfter, phone: phoneInfo, errors: errors.filter(e => !/Wake Lock/.test(e)) };
 result.ok = before > 10 && after > 10 && !result.errors.length;
 console.log(JSON.stringify(result, null, 2));
 await tvBrowser.close();
