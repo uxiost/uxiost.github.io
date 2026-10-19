@@ -8,7 +8,7 @@
   <script>
     // Siempre la última versión: si la publicada no es la que se ha cargado
     // (caché del navegador o del service worker), se recarga una vez.
-    window.MGS_BUILD = "15";
+    window.MGS_BUILD = "16";
     (function () {
       if (MGS_BUILD.indexOf("__") === 0) return; // copia local de desarrollo
       fetch("version.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
@@ -25,7 +25,7 @@
     })();
   </script>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=15">
+  <link rel="stylesheet" href="css/style.css?v=16">
   <style>
     [hidden] { display: none !important; }
     html, body { background: #000; height: 100%; overflow: hidden; }
@@ -64,6 +64,9 @@
     const q = "?v=" + version;
     const { BUTTONS, randomCode } = await import("./js/protocol.js" + q);
     const { TV_PREFIX, lowLatencyReceivers, boostBitrate } = await import("./js/stream.js" + q);
+    const { makeBackChannel } = await import("./js/backchan.js" + q);
+    // Vídeo de vuelta diminuto: fps que pintamos y botones del mando de la tele.
+    const back = makeBackChannel(15);
     const { remember, report, selfTest } = await import("./js/diag.js" + q);
     const { mseAudioSupported, startMseAudio, beep } = await import("./js/tvaudio.js" + q);
     setInterval(async () => {
@@ -115,7 +118,8 @@
         // (dos vídeos a la vez ahogan el procesador de la tele).
         if (currentCall && currentCall !== call) { try { currentCall.close(); } catch (e) {} }
         currentCall = call;
-        call.answer(undefined, { sdpTransform: boostBitrate });
+        // La respuesta de la tele no limita el caudal: lo decide el móvil (su codificador).
+        call.answer(back.stream, { sdpTransform: sdp => boostBitrate(sdp, 2000, 10000) });
         report("tv", "call", { code });
         call.peerConnection && (call.peerConnection.onconnectionstatechange = () =>
           report("tv", "pc-state", { code, st: call.peerConnection.connectionState }));
@@ -154,12 +158,22 @@
     if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) video.requestVideoFrameCallback(countFrames);
     let lagMax = 0, lagLast = performance.now();
     setInterval(() => { const now = performance.now(); lagMax = Math.max(lagMax, now - lagLast - 100); lagLast = now; }, 100);
+    // fps mostrados en ventana deslizante de 2 s, para el vídeo de vuelta.
+    const shownHist = [];
+    setInterval(() => {
+      shownHist.push([performance.now(), presented]);
+      while (shownHist.length > 3) shownHist.shift();
+      if (shownHist.length >= 3 && !video.paused && video.srcObject) {
+        const [t0, f0] = shownHist[0], [t1, f1] = shownHist[shownHist.length - 1];
+        back.set({ shownFps: (f1 - f0) / ((t1 - t0) / 1000), stats: 1 });
+      }
+    }, 1000);
+
     async function presentedFps() {
       const a = presented; await new Promise(r => setTimeout(r, 2000));
       return Math.round((presented - a) / 2 * 10) / 10;
     }
 
-    let statsSent = false;
     function show(stream, call) {
       // "stream" llega una vez por pista (audio y vídeo): no recargar si es el mismo.
       if (video.srcObject !== stream) video.srcObject = stream;
@@ -271,6 +285,7 @@
     });
     window.addEventListener("keyup", e => { const b = KEY_MAP[e.keyCode]; if (b) keys.delete(b); });
 
+    let backKeys = 0;
     function poll() {
       const pressed = new Set(keys);
       for (const gp of navigator.getGamepads ? navigator.getGamepads() : []) {
@@ -290,27 +305,46 @@
         mask = m;
         lastSent = Date.now();
       }
+      // Sin canal de datos (Chromecast de LG), los botones viajan en el vídeo de vuelta.
+      const viaBack = ctrl && ctrl.open ? 0 : m;
+      if (viaBack !== backKeys) { backKeys = viaBack; back.set({ keys: viaBack }); back.drawNow(); }
       requestAnimationFrame(poll);
     }
     poll();
 
-    // Estadísticas pequeñas para ver el retraso real.
+    // Cada 5 s: lo que de verdad pinta la tele (fps mostrados, coste de decodificar,
+    // búfer, pérdidas). Va a la telemetría, y el móvil lo usa para ajustar la calidad.
+    let prevS = null;
     setInterval(async () => {
       const pc = currentCall && currentCall.peerConnection;
-      if (!pc) return;
-      const stats = await pc.getStats();
-      stats.forEach(r => {
-        if (r.type === "inbound-rtp" && r.kind === "video") {
-          const fps = r.framesPerSecond ? Math.round(r.framesPerSecond) : "?";
-          const jb = r.jitterBufferEmittedCount ? Math.round(1000 * r.jitterBufferDelay / r.jitterBufferEmittedCount) : "?";
-          $("#stat").textContent = `v${version} · ${r.frameWidth || "?"}×${r.frameHeight || "?"} · ${fps} fps · búfer ${jb} ms`;
-          if (!statsSent && r.framesDecoded > 300) {
-            statsSent = true;
-            report("tv", "stats", { code, w: r.frameWidth, h: r.frameHeight, fps, jb, dropped: r.framesDropped, decoded: r.framesDecoded, dec: r.decoderImplementation, codec: r.codecId });
-          }
-        }
+      if (!pc || pc.connectionState !== "connected") { prevS = null; return; }
+      const now = { t: performance.now(), shown: presented };
+      (await pc.getStats()).forEach(r => {
+        if (r.type === "inbound-rtp" && r.kind === "video") Object.assign(now, {
+          dec: r.framesDecoded, decT: r.totalDecodeTime, jbD: r.jitterBufferDelay, jbN: r.jitterBufferEmittedCount,
+          lost: r.packetsLost, bytes: r.bytesReceived, freezes: r.freezeCount, w: r.frameWidth, h: r.frameHeight,
+        });
       });
-    }, 2000);
+      if (prevS && now.dec != null) {
+        const dt = (now.t - prevS.t) / 1000;
+        const dDec = now.dec - prevS.dec;
+        const tickData = {
+          code, v: version,
+          shownFps: Math.round((now.shown - prevS.shown) / dt * 10) / 10,
+          decFps: Math.round(dDec / dt * 10) / 10,
+          decMs: dDec ? Math.round((now.decT - prevS.decT) / dDec * 1000 * 10) / 10 : null,
+          jbMs: now.jbN > prevS.jbN ? Math.round((now.jbD - prevS.jbD) / (now.jbN - prevS.jbN) * 1000) : null,
+          lost: now.lost - prevS.lost, freezes: now.freezes - prevS.freezes,
+          kbps: Math.round((now.bytes - prevS.bytes) * 8 / dt / 1000), res: [now.w, now.h],
+          lagMaxMs: Math.round(lagMax), audioLagMs: mse ? mse.info().lagMs : null,
+        };
+        lagMax = 0;
+        report("tv", "tick", tickData);
+        back.set({ decMs: tickData.decMs || 0 });
+        $("#stat").textContent = `v${version} · ${now.w}×${now.h} · ${tickData.shownFps} fps · ${tickData.kbps} kbps`;
+      }
+      prevS = now;
+    }, 5000);
 
     start();
 

@@ -1,11 +1,11 @@
 // Consola: ejecuta el emulador de PS1 (EmulatorJS, núcleo PCSX-ReARMed en
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
-import * as store from "./storage.js?v=15";
-import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=15";
-import { attachTouchPad, PAD_HTML } from "./padui.js?v=15";
-import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=15";
-import { installAudioTap, setLocalMuted, streamTo, castPage } from "./stream.js?v=15";
+import * as store from "./storage.js?v=16";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=16";
+import { attachTouchPad, PAD_HTML } from "./padui.js?v=16";
+import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=16";
+import { installAudioTap, setLocalMuted, streamTo, castPage } from "./stream.js?v=16";
 
 // Antes de que arranque el emulador: así podemos mandar su audio a la tele.
 installAudioTap();
@@ -749,6 +749,7 @@ async function runDownload(job, label, slotChoice, url, autoplay) {
 // ---------------------------------------------------------------- ver en la tele (streaming)
 
 let tvStream = null;
+const tvRemotePad = { player: 0, mask: 0 };
 
 function peerReady() {
   return new Promise(resolve => {
@@ -769,17 +770,22 @@ async function startTv(tvCode) {
   if (!tvCode) return;
   stopTv();
   localStorage.setItem("mgs.tv", tvCode);
+  document.body.classList.add("tvstream"); // zona de juego siempre 4:3: se captura sin copiar
   $("#tvStop").hidden = false;
   if ($("#muteLocal").checked) setLocalMuted(true);
   await peerReady();
   const canvas = () => (started && window.EJS_emulator && window.EJS_emulator.started ? window.EJS_emulator.canvas : null);
-  tvStream = streamTo(peer, tvCode, canvas, peer.id, tvStatus);
+  tvStream = streamTo(peer, tvCode, canvas, peer.id, tvStatus, $("#tvQuality").value, {
+    // Mando de la tele (o mando emparejado con ella) por el vídeo de vuelta.
+    onTvKeys: m => applyMask(tvRemotePad, m),
+  });
 }
 
 function stopTv() {
   if (tvStream) tvStream.stop();
   tvStream = null;
   localStorage.removeItem("mgs.tv");
+  document.body.classList.remove("tvstream");
   setLocalMuted(false);
   $("#tvStop").hidden = true;
   $("#tvState").textContent = "";
@@ -806,6 +812,11 @@ async function playAfterTvConnect() {
   }
 }
 $("#tvStop").onclick = stopTv;
+try { $("#tvQuality").value = localStorage.getItem("mgs.tvq") || "auto"; } catch (e) { /* sin almacenamiento */ }
+$("#tvQuality").onchange = e => {
+  try { localStorage.setItem("mgs.tvq", e.target.value); } catch (err) { /* sin almacenamiento */ }
+  if (tvStream) tvStream.setQuality(e.target.value);
+};
 $("#muteLocal").onchange = e => setLocalMuted(!!tvStream && e.target.checked);
 $("#castBtn").onclick = async () => {
   const tvCode = randomCode();

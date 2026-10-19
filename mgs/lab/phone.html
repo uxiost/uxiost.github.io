@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Laboratorio — móvil simulado</title>
+  <style>
+    html, body { margin: 0; background: #000; color: #ccc; font: 14px system-ui, sans-serif; }
+    #src { width: 100%; max-width: 540px; display: block; }
+    #out { padding: 8px; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+  </style>
+</head>
+<body>
+  <!-- Fuente sintética con la misma forma que el lienzo del emulador en el móvil
+       (1080×810 a 60 fps), con movimiento, ruido y una marca de tiempo codificada
+       en la propia imagen para medir el retraso real extremo a extremo. -->
+  <canvas id="src" width="1080" height="810"></canvas>
+  <div id="out">Uso: lab/phone.html#CODIGO_TELE</div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+  <script type="module">
+    import { installAudioTap, streamTo, tuneStream } from "../js/stream.js";
+    import { PEER_PREFIX, randomCode } from "../js/protocol.js";
+    import { stampTime } from "./stamp.js";
+
+    installAudioTap();
+    // ?lines=720&fps=30&kbps=2500 para probar variantes
+    const qp = new URLSearchParams(location.search);
+    tuneStream({ lines: +qp.get("lines") || 0, fps: +qp.get("fps") || 0, kbps: +qp.get("kbps") || 0 });
+    const tvCode = location.hash.slice(1);
+    const c = document.getElementById("src");
+    const g = c.getContext("2d");
+    let frame = 0;
+    function draw() {
+      frame++;
+      // Fondo con degradado móvil y "sprites" que cruzan la pantalla (como un juego).
+      const t = performance.now() / 1000;
+      const grd = g.createLinearGradient(0, 0, 1080, 810);
+      grd.addColorStop(0, `hsl(${(t * 40) % 360},50%,20%)`);
+      grd.addColorStop(1, `hsl(${(t * 40 + 120) % 360},50%,35%)`);
+      g.fillStyle = grd;
+      g.fillRect(0, 0, 1080, 810);
+      for (let i = 0; i < 24; i++) {
+        const x = (i * 97 + t * (60 + i * 13)) % 1180 - 50;
+        const y = 120 + (i * 61) % 640;
+        g.fillStyle = `hsl(${i * 15},80%,60%)`;
+        g.fillRect(x, y, 40 + (i % 5) * 10, 40);
+      }
+      g.fillStyle = "#fff";
+      g.font = "bold 40px sans-serif";
+      g.fillText("FRAME " + frame, 60, 760);
+      stampTime(g, 1080);
+      requestAnimationFrame(draw);
+    }
+    draw();
+
+    // Tono de prueba por la salida de audio (la "toma" lo manda a la tele).
+    window.startTone = () => {
+      const ctx = new AudioContext();
+      const o = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.3;
+      o.frequency.value = 440;
+      o.connect(gain);
+      gain.connect(ctx.destination);
+      o.start();
+      return ctx.state;
+    };
+
+    const status = [];
+    const peer = new Peer(PEER_PREFIX + "lab-" + randomCode(), { debug: 1 });
+    peer.on("open", () => {
+      window.labKeys = [];
+      window.labStream = streamTo(peer, tvCode, () => c, peer.id, (msg) => {
+        status.push(msg);
+        document.getElementById("out").textContent = status.slice(-6).join("\n");
+      }, qp.get("q") || "auto", { onTvKeys: k => window.labKeys.push(k) });
+    });
+    window.labPeer = peer;
+    window.labStatus = status;
+  </script>
+</body>
+</html>

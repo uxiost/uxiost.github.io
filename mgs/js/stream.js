@@ -3,8 +3,9 @@
 // su navegador o en su Chromecast integrado mediante un receptor público que
 // carga páginas web (DashCast o URL Cast Receiver), sin registrar ninguna app.
 
-import { PEER_PREFIX } from "./protocol.js?v=15";
-import { report } from "./diag.js?v=15";
+import { PEER_PREFIX } from "./protocol.js?v=16";
+import { report } from "./diag.js?v=16";
+import { readBackChannel } from "./backchan.js?v=16";
 
 export const TV_PREFIX = PEER_PREFIX + "tv-";
 
@@ -106,11 +107,11 @@ export function preferH264(sdp) {
 }
 
 // Que el vídeo empiece nítido: por defecto WebRTC arranca a ~300 kbps y sube poco a poco.
-export function boostBitrate(sdp) {
+export function boostBitrate(sdp, startKbps = Math.round(MAX_KBPS / 2), maxKbps = Math.round(MAX_KBPS * 1.15)) {
   const lines = sdp.split("\r\n");
   const vp8 = lines.filter(l => /^a=rtpmap:\d+ (VP8|H264)\/90000/i.test(l)).map(l => l.match(/^a=rtpmap:(\d+)/)[1]);
   // Sin mínimo forzado: si la wifi o la tele no dan abasto, el emisor debe poder bajar.
-  const extra = "x-google-start-bitrate=800;x-google-max-bitrate=1800";
+  const extra = `x-google-start-bitrate=${startKbps};x-google-max-bitrate=${maxKbps}`;
   for (const pt of vp8) {
     const i = lines.findIndex(l => l.startsWith(`a=fmtp:${pt} `));
     if (i >= 0) {
@@ -132,20 +133,39 @@ export function lowLatencyReceivers(pc) {
 
 // La tele del Chromecast decodifica VP8 por software y va justa de CPU:
 // 480 líneas y 30 fps sobran para PS1 (240–480 de origen).
-const MAX_LINES = 480;
-const FPS = 30;
+let MAX_LINES = 480;
+let FPS = 30;
+let MAX_KBPS = 1600;
+// Para el laboratorio: probar otras resoluciones, fps o caudal sin tocar el código.
+export function tuneStream({ lines, fps, kbps } = {}) {
+  if (lines) MAX_LINES = lines;
+  if (fps) FPS = fps;
+  if (kbps) MAX_KBPS = kbps;
+}
 
-// Copiamos solo la imagen del juego (4:3, sin las bandas negras del lienzo del
-// emulador) a un lienzo fijo de 640×480. Así la resolución en la tele no depende
-// de cómo sujetes el móvil. 640×480 (el doble de la resolución nativa de MGS1):
-// la tele de prueba la decodifica a 30 fps en ~7 ms por imagen.
+// Imagen del juego para la tele. Camino rápido: capturar el lienzo del emulador
+// tal cual (sin trabajo en el hilo principal, que en el móvil ya va cargado con
+// el emulador) y que el codificador lo reduzca a 480 líneas. Solo si el lienzo
+// no es 4:3 (bandas negras) se recorta copiando a un lienzo aparte, que cuesta CPU.
 const OUT_W = 640, OUT_H = 480;
+const is43 = (w, h) => w && h && Math.abs(w / h - 4 / 3) < 0.06;
+
 function gameFeed(src) {
+  if (is43(src.width, src.height)) {
+    const track = src.captureStream().getVideoTracks()[0];
+    track.contentHint = "motion";
+    return {
+      track,
+      mode: "direct",
+      height: () => src.height,
+      ok: () => is43(src.width, src.height),
+      stop() { track.stop(); },
+    };
+  }
   const out = document.createElement("canvas");
   out.width = OUT_W;
   out.height = OUT_H;
   const g = out.getContext("2d", { alpha: false });
-  g.imageSmoothingQuality = "high";
   const copy = () => {
     const w = src.width, h = src.height;
     if (!w || !h) return;
@@ -158,14 +178,21 @@ function gameFeed(src) {
   loop();
   const track = out.captureStream(FPS).getVideoTracks()[0];
   track.contentHint = "motion";
-  return { track, stop() { cancelAnimationFrame(raf); track.stop(); } };
+  return {
+    track,
+    mode: "copy",
+    height: () => OUT_H,
+    ok: () => !is43(src.width, src.height),
+    stop() { cancelAnimationFrame(raf); track.stop(); },
+  };
 }
 
 async function tuneVideoSender(sender, height) {
   const p = sender.getParameters();
-  p.degradationPreference = "balanced";
+  // En un juego importa más la fluidez que la nitidez: bajar resolución antes que fps.
+  p.degradationPreference = "maintain-framerate";
   p.encodings = p.encodings && p.encodings.length ? p.encodings : [{}];
-  p.encodings[0].maxBitrate = 1_600_000;
+  p.encodings[0].maxBitrate = MAX_KBPS * 1000;
   p.encodings[0].maxFramerate = FPS;
   p.encodings[0].scaleResolutionDownBy = Math.max(1, (height || MAX_LINES) / MAX_LINES);
   try { await sender.setParameters(p); } catch (e) { console.warn("setParameters", e); }
@@ -222,23 +249,53 @@ function silentAudioTrack() {
   }
 }
 
-// Cómo va el emisor: fps codificados, si algo lo limita (cpu/ancho de banda), RTT…
-async function sendStats(pc, tvCode, stage) {
-  if (!pc || pc.connectionState === "closed") return;
-  const pads = [...(navigator.getGamepads ? navigator.getGamepads() : [])].filter(Boolean).length;
-  const out = { tv: tvCode, st: pc.connectionState, vis: document.visibilityState, pads, audio: audioInfo() };
-  (await pc.getStats()).forEach(r => {
-    if (r.type === "outbound-rtp" && r.kind === "video") Object.assign(out, {
-      w: r.frameWidth, h: r.frameHeight, fps: r.framesPerSecond, limit: r.qualityLimitationReason,
-      target: r.targetBitrate, encMs: r.framesEncoded ? Math.round(1000 * r.totalEncodeTime / r.framesEncoded) : null,
-      nack: r.nackCount, pli: r.pliCount, keyframes: r.keyFramesEncoded, retx: r.retransmittedPacketsSent,
+// Niveles de calidad para la tele (de mejor a más ligero). En "auto" el móvil
+// baja o sube de nivel según los fotogramas que la tele dice que pinta.
+export const QUALITY = [
+  { name: "720p", lines: 720, fps: 30, kbps: 4000 },
+  { name: "576p", lines: 576, fps: 30, kbps: 3000 },
+  { name: "480p", lines: 480, fps: 30, kbps: 2200 },
+  { name: "360p", lines: 360, fps: 30, kbps: 1400 },
+];
+
+// Muestra cada 5 s (diferencias, no acumulados) del lado del móvil.
+function phoneSampler(pc) {
+  let prev = null;
+  let frames0 = null;
+  return async extra => {
+    const now = { t: performance.now() };
+    (await pc.getStats()).forEach(r => {
+      if (r.type === "outbound-rtp" && r.kind === "video") Object.assign(now, {
+        enc: r.framesEncoded, encT: r.totalEncodeTime, bytes: r.bytesSent, w: r.frameWidth, h: r.frameHeight,
+        limit: r.qualityLimitationReason,
+      });
+      if (r.type === "remote-inbound-rtp" && r.kind === "video") Object.assign(now, {
+        rtt: r.roundTripTime, loss: r.fractionLost, jitter: r.jitter,
+      });
     });
-    if (r.type === "candidate-pair" && r.nominated && r.state === "succeeded") Object.assign(out, {
-      rttMs: r.currentRoundTripTime != null ? Math.round(r.currentRoundTripTime * 1000) : null,
-      availOut: r.availableOutgoingBitrate,
-    });
-  });
-  report("phone", stage, out);
+    const gm = window.EJS_emulator && window.EJS_emulator.gameManager;
+    const frameNum = gm && gm.getFrameNum ? gm.getFrameNum() : null;
+    let out = null;
+    if (prev) {
+      const dt = (now.t - prev.t) / 1000;
+      const dEnc = now.enc - prev.enc;
+      out = {
+        encFps: Math.round(dEnc / dt * 10) / 10,
+        encMs: dEnc ? Math.round((now.encT - prev.encT) / dEnc * 1000 * 10) / 10 : null,
+        kbps: Math.round((now.bytes - prev.bytes) * 8 / dt / 1000),
+        res: [now.w, now.h], limit: now.limit,
+        rttMs: now.rtt != null ? Math.round(now.rtt * 1000) : null,
+        loss: now.loss, jitterMs: now.jitter != null ? Math.round(now.jitter * 1000) : null,
+        emuFps: frameNum != null && frames0 != null ? Math.round((frameNum - frames0) / dt) : null,
+        vis: document.visibilityState,
+        pads: [...(navigator.getGamepads ? navigator.getGamepads() : [])].filter(Boolean).length,
+        ...extra,
+      };
+    }
+    prev = now;
+    frames0 = frameNum;
+    return out;
+  };
 }
 
 function audioSenderTrack(pc) {
@@ -268,8 +325,41 @@ function callWithoutDataChannel(peer, id, stream, options) {
 // lista (el Chromecast tarda unos segundos en abrirla), reintenta. Antes de
 // que arranque el juego manda una pantalla de estado y, cuando arranca,
 // cambia la imagen y el sonido por los del juego sin cortar la conexión.
-export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
+export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus, quality = "auto", opts = {}) {
   let call = null;
+  // Calidad: "auto" empieza en 720p y se adapta; o un nivel fijo (0–3).
+  let auto = quality === "auto";
+  let level = auto ? 0 : Math.min(QUALITY.length - 1, Math.max(0, Number(quality) || 0));
+  let lastChange = Date.now();
+  let floor = QUALITY.length - 1;  // nivel más bajo permitido (sube si bajar no ayuda)
+  const fpsAt = {};                // fps de la tele medidos en cada nivel
+  const applyLevel = () => {
+    const q = QUALITY[level];
+    tuneStream({ lines: q.lines, fps: q.fps, kbps: q.kbps });
+    const pc = call && call.peerConnection;
+    const vs = pc && pc.getSenders().find(x => x.track && x.track === gameVideo);
+    if (vs) tuneVideoSender(vs, gameHeight);
+  };
+  applyLevel();
+  // Lo que la tele nos cuenta por su vídeo de vuelta (backchan.js).
+  const tvSamples = [];   // { at, shownFps, decMs }
+  let tvKeys = 0;
+  let back = null, backCall = null;
+  const listenBack = (c, stream) => {
+    if (backCall === c) return;
+    if (back) back.stop();
+    backCall = c;
+    back = readBackChannel(stream, m => {
+      if (m.stats) {
+        tvSamples.push({ at: Date.now(), shownFps: m.shownFps, decMs: m.decMs });
+        while (tvSamples.length && Date.now() - tvSamples[0].at > 20000) tvSamples.shift();
+      }
+      if (m.keys !== tvKeys) {
+        tvKeys = m.keys;
+        if (opts.onTvKeys) opts.onTvKeys(m.keys);
+      }
+    });
+  };
   let stopped = false;
   let timer = null;
   let upgrade = null;
@@ -295,7 +385,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
     if (canvas && !gameVideo) {
       feed = gameFeed(canvas);
       gameVideo = feed.track;
-      gameHeight = OUT_H;
+      gameHeight = feed.height();
     }
     if (!gameAudio) gameAudio = audioTracks()[0] || null;
     return { video: gameVideo || card.track, audio: gameAudio || silent };
@@ -305,6 +395,18 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
   const upgradeTracks = async () => {
     const pc = call && call.peerConnection;
     if (!pc || pc.connectionState !== "connected") return;
+    // Si el lienzo cambia de forma o tamaño (girar el móvil, conectar un mando),
+    // rehacemos la captura o reajustamos la escala del codificador.
+    if (feed && !feed.ok()) {
+      feed.stop();
+      feed = gameFeed(getCanvas());
+      gameVideo = feed.track;
+      gameHeight = feed.height();
+    } else if (feed && feed.height() !== gameHeight) {
+      gameHeight = feed.height();
+      const vs = pc.getSenders().find(x => x.track === gameVideo);
+      if (vs) tuneVideoSender(vs, gameHeight);
+    }
     const { video, audio } = currentTracks();
     for (const sender of pc.getSenders()) {
       const want = sender.track && sender.track.kind === "video" ? video : sender.track && sender.track.kind === "audio" ? audio : null;
@@ -313,13 +415,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
         if (want === gameVideo) {
           tuneVideoSender(sender, gameHeight);
           say("En la tele ✓", true, "¡A jugar!");
-          report("phone", "game-on-tv", { tv: tvCode, src: [getCanvas()?.width, getCanvas()?.height], audio: audioInfo(), gameAudio: !!gameAudio });
-          // Salud del envío cada 15 s durante 90 s (pocos mensajes: el canal tiene límite diario).
-          let n = 0;
-          const health = setInterval(() => {
-            if (++n > 6 || !call || call.peerConnection !== pc) return clearInterval(health);
-            sendStats(pc, tvCode, "health");
-          }, 15000);
+          report("phone", "game-on-tv", { tv: tvCode, src: [getCanvas()?.width, getCanvas()?.height], mode: feed && feed.mode, audio: audioInfo(), gameAudio: !!gameAudio });
         }
       }
     }
@@ -336,6 +432,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
       sdpTransform: sdp => boostBitrate(preferH264(sdp)),
     });
     call = c;
+    c.on("stream", st => listenBack(c, st)); // vídeo de vuelta de la tele
     const pcWatch = setInterval(() => {
       if (c !== call) return clearInterval(pcWatch);
       const pc = c.peerConnection;
@@ -388,14 +485,97 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus) {
   peer.on("error", onPeerError);
 
   upgrade = setInterval(upgradeTracks, 1000);
+
+  // Al volver a la página (pantalla encendida, volver de otra app), reconectar ya
+  // si la llamada se cayó, sin esperar a los temporizadores.
+  const onVisible = () => {
+    if (document.visibilityState !== "visible" || stopped) return;
+    const pc = call && call.peerConnection;
+    if (!pc || ["failed", "closed", "disconnected"].includes(pc.connectionState)) retry();
+  };
+  document.addEventListener("visibilitychange", onVisible);
+  document.addEventListener("resume", onVisible);
+
+  // Mantener la pantalla del móvil encendida mientras se envía a la tele.
+  let wake = null;
+  const keepAwake = async () => {
+    if (wake || document.visibilityState !== "visible" || !navigator.wakeLock) return;
+    try {
+      wake = await navigator.wakeLock.request("screen");
+      wake.addEventListener("release", () => { wake = null; });
+    } catch (e) { /* sin permiso o sin soporte */ }
+  };
+  keepAwake();
+  const wakeIv = setInterval(keepAwake, 5000);
+
+  // Cada 5 s: estado del envío a la telemetría y, en "auto", ajuste de calidad
+  // según los fps que la propia tele dice estar pintando.
+  let sampler = null, samplerPc = null;
+  const tick = setInterval(async () => {
+    const pc = call && call.peerConnection;
+    if (!pc || pc.connectionState !== "connected" || !gameVideo) return;
+    if (pc !== samplerPc) { samplerPc = pc; sampler = phoneSampler(pc); }
+    const s = await sampler({ level: QUALITY[level].name, auto, mode: feed && feed.mode });
+    if (s) report("phone", "tick", { tv: tvCode, ...s });
+    if (!auto) return;
+    {
+      // Ventana de los últimos 6 s, ignorando los primeros segundos tras un cambio.
+      // Se compara lo que la tele pinta con lo que el móvil realmente envía: si el
+      // emulador va lento (arrancando, cargando), la tele no tiene la culpa.
+      const win = tvSamples.filter(e => Date.now() - e.at < 6000 && e.at > lastChange + 4000);
+      const sent = s && s.encFps;
+      if (win.length < 10 || !sent) return;
+      const fps = win.map(e => e.shownFps);
+      const avg = fps.reduce((a, b) => a + b, 0) / fps.length;
+      const target = QUALITY[level].fps;
+      const sourceOk = sent >= target * 0.85;
+      // Si al bajar de nivel la tele no ha mejorado, el límite no es la resolución
+      // (es pintar en pantalla): volvemos al nivel anterior y no bajamos más.
+      if (sourceOk && fpsAt[level - 1] != null && fpsAt[level] == null) {
+        fpsAt[level] = avg;
+        if (avg < fpsAt[level - 1] * 1.1) {
+          level--; floor = level; lastChange = Date.now(); applyLevel();
+          report("phone", "quality-revert", { tv: tvCode, to: QUALITY[level].name, tvFps: avg });
+          onStatus(`En la tele ✓ · calidad ${QUALITY[level].name}`, true);
+          return;
+        }
+      }
+      if (sourceOk && avg < sent * 0.8 && level < floor) {
+        fpsAt[level] = avg;
+        level++; lastChange = Date.now(); applyLevel();
+        report("phone", "quality-down", { tv: tvCode, to: QUALITY[level].name, tvFps: avg, sent });
+        onStatus(`En la tele ✓ · calidad ${QUALITY[level].name} (la tele iba a ${Math.round(avg)} de ${Math.round(sent)} fps)`, true);
+      } else if (sourceOk && avg >= sent * 0.93 && Math.min(...fps) >= sent * 0.8 && level > 0 && Date.now() - lastChange > 30000) {
+        fpsAt[level] = avg;
+        level--; delete fpsAt[level]; lastChange = Date.now(); applyLevel();
+        report("phone", "quality-up", { tv: tvCode, to: QUALITY[level].name, tvFps: avg, sent });
+        onStatus(`En la tele ✓ · calidad ${QUALITY[level].name}`, true);
+      }
+    }
+  }, 5000);
   streaming = true;
   attempt();
   return {
+    setQuality(q) {
+      auto = q === "auto";
+      if (!auto) level = Math.min(QUALITY.length - 1, Math.max(0, Number(q) || 0));
+      lastChange = Date.now();
+      applyLevel();
+    },
+    get level() { return QUALITY[level].name; },
+    get tvFps() { const l = tvSamples[tvSamples.length - 1]; return l ? l.shownFps : null; },
+    get tvSamples() { return tvSamples.length; },
     stop() {
       stopped = true;
       streaming = false;
       clearTimeout(timer);
       clearInterval(upgrade);
+      clearInterval(tick);
+      clearInterval(wakeIv);
+      if (back) back.stop();
+      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("resume", onVisible);
+      if (wake) wake.release().catch(() => {});
       peer.off("error", onPeerError);
       const old = call;
       call = null;

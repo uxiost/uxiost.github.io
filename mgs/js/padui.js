@@ -2,7 +2,7 @@
 // controles en pantalla de la consola (play.html en el móvil).
 // Dentro de `root`: un elemento .dpad (cruceta) y botones con data-btn="cross" etc.
 
-import { maskFromSet } from "./protocol.js?v=15";
+import { maskFromSet } from "./protocol.js?v=16";
 
 const DPAD_DEADZONE = 0.18;
 

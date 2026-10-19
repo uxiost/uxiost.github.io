@@ -1,10 +1,18 @@
-// Diagnóstico remoto: la tele (y el móvil) mandan sus errores a un canal
-// privado de ntfy.sh para poder ver qué falla sin hacer fotos a la pantalla.
-// Solo se envía: tipo de navegador, funciones disponibles y mensajes de error.
+// Telemetría y diagnóstico: la tele y el móvil mandan su estado (solo datos
+// técnicos: navegador, fps, resolución, caudal, errores) a un buzón público de
+// webhook.site. Sirve para depurar a distancia y, además, es el canal por el que
+// el móvil se entera de cuántos fotogramas pinta de verdad la tele (el Chromecast
+// de las LG no tiene canales de datos WebRTC para decírselo directamente).
+// (Antes era ntfy.sh, pero su plan gratuito corta tras unos cientos de mensajes al día.)
 
-const TOPIC = "mgsweb-dbg-7ae1cc668aec";
+export const HOOK = "96afd25f-a7f1-4259-88e0-7b2df6c7646e";
+const POST_URL = `https://webhook.site/${HOOK}`;
+const READ_URL = `https://webhook.site/token/${HOOK}/requests`;
+
 const log = [];
-let sent = 0;
+const queue = [];
+let total = 0;
+let lastKey = "";
 
 export function remember(...args) {
   const line = args.map(a => (a instanceof Error ? `${a.name}: ${a.message}` : typeof a === "object" ? safe(a) : String(a))).join(" ");
@@ -16,14 +24,43 @@ function safe(o) {
   try { return JSON.stringify(o).slice(0, 300); } catch (e) { return String(o); }
 }
 
-let lastKey = "";
+// Se acumula y se envía por lotes cada 5 s (o al cerrar la página).
 export function report(role, stage, data = {}) {
   const key = role + stage + JSON.stringify(data);
   if (key === lastKey) return; // repetido
   lastKey = key;
-  if (sent++ > 150) return; // no inundar el canal
-  const body = JSON.stringify({ role, stage, t: new Date().toISOString(), ...data, log: log.slice(-12) });
-  fetch(`https://ntfy.sh/${TOPIC}`, { method: "POST", body: body.slice(0, 3900) }).catch(() => {});
+  if (total++ > 3000) return;
+  const entry = { role, stage, t: Date.now(), ...data };
+  if (/error|blocked|failed/i.test(stage)) entry.log = log.slice(-8);
+  queue.push(entry);
+  if (queue.length >= 25) flush();
+}
+
+function flush(beacon) {
+  if (!queue.length) return;
+  const body = JSON.stringify(queue.splice(0, queue.length));
+  if (beacon && navigator.sendBeacon) {
+    navigator.sendBeacon(POST_URL, new Blob([body], { type: "text/plain" }));
+  } else {
+    fetch(POST_URL, { method: "POST", body, keepalive: body.length < 60000 }).catch(() => {});
+  }
+}
+setInterval(flush, 5000);
+addEventListener("pagehide", () => flush(true));
+
+// Últimas entradas que cumplan `filter` (p. ej. el móvil leyendo las de su tele).
+export async function readRecent(filter, perPage = 20) {
+  const r = await fetch(`${READ_URL}?sorting=newest&per_page=${perPage}`, { cache: "no-store" });
+  if (!r.ok) throw new Error("telemetría " + r.status);
+  const j = await r.json();
+  const out = [];
+  for (const req of j.data || []) {
+    try {
+      const v = JSON.parse(req.content);
+      for (const e of Array.isArray(v) ? v : [v]) if (filter(e)) out.push(e);
+    } catch (e) { /* entrada ajena */ }
+  }
+  return out.sort((a, b) => b.t - a.t);
 }
 
 // Pruebas de WebRTC dentro de este mismo dispositivo: canal de datos y vídeo.

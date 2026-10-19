@@ -190,3 +190,10 @@ body.padpage .screen { touch-action: auto; }
   .side .face { width: min(42vw, 32vh, 230px); }
   .side .sh { width: min(19vw, 90px); }
 }
+
+/* Enviando a la tele: el lienzo del emulador debe ser 4:3 exacto (sin bandas)
+   para capturarlo directamente, sin copias que roben CPU al emulador. */
+body.console.playing.tvstream #game { aspect-ratio: 4 / 3; height: 100%; width: auto; max-width: 100%; justify-self: center; align-self: center; }
+@media (orientation: portrait) {
+  body.console.playing.tvstream #game { width: 100%; height: auto; }
+}
