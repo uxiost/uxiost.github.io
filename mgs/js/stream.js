@@ -3,9 +3,9 @@
 // su navegador o en su Chromecast integrado mediante un receptor público que
 // carga páginas web (DashCast o URL Cast Receiver), sin registrar ninguna app.
 
-import { PEER_PREFIX } from "./protocol.js?v=16";
-import { report } from "./diag.js?v=16";
-import { readBackChannel } from "./backchan.js?v=16";
+import { PEER_PREFIX } from "./protocol.js?v=17";
+import { report } from "./diag.js?v=17";
+import { readBackChannel } from "./backchan.js?v=17";
 
 export const TV_PREFIX = PEER_PREFIX + "tv-";
 
@@ -255,8 +255,13 @@ export const QUALITY = [
   { name: "720p", lines: 720, fps: 30, kbps: 4000 },
   { name: "576p", lines: 576, fps: 30, kbps: 3000 },
   { name: "480p", lines: 480, fps: 30, kbps: 2200 },
-  { name: "360p", lines: 360, fps: 30, kbps: 1400 },
+  { name: "480p·24", lines: 480, fps: 24, kbps: 1800 },
+  { name: "360p·24", lines: 360, fps: 24, kbps: 1200 },
+  { name: "360p·20", lines: 360, fps: 20, kbps: 900 },
 ];
+// En "auto" se empieza aquí: lo que una tele lenta (la LG de pruebas) aguanta con
+// holgura; a partir de ahí sube si la tele va sobrada o baja (también fps) si no.
+export const AUTO_START = 2;
 
 // Muestra cada 5 s (diferencias, no acumulados) del lado del móvil.
 function phoneSampler(pc) {
@@ -329,9 +334,10 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus, quality =
   let call = null;
   // Calidad: "auto" empieza en 720p y se adapta; o un nivel fijo (0–3).
   let auto = quality === "auto";
-  let level = auto ? 0 : Math.min(QUALITY.length - 1, Math.max(0, Number(quality) || 0));
+  let level = auto ? AUTO_START : Math.min(QUALITY.length - 1, Math.max(0, Number(quality) || 0));
   let lastChange = Date.now();
   let floor = QUALITY.length - 1;  // nivel más bajo permitido (sube si bajar no ayuda)
+  let lastReset = 0;
   const fpsAt = {};                // fps de la tele medidos en cada nivel
   const applyLevel = () => {
     const q = QUALITY[level];
@@ -351,7 +357,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus, quality =
     backCall = c;
     back = readBackChannel(stream, m => {
       if (m.stats) {
-        tvSamples.push({ at: Date.now(), shownFps: m.shownFps, decMs: m.decMs });
+        tvSamples.push({ at: Date.now(), shownFps: m.shownFps, decMs: m.decMs, jbMs: m.jbMs });
         while (tvSamples.length && Date.now() - tvSamples[0].at > 20000) tvSamples.shift();
       }
       if (m.keys !== tvKeys) {
@@ -527,26 +533,41 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus, quality =
       if (win.length < 10 || !sent) return;
       const fps = win.map(e => e.shownFps);
       const avg = fps.reduce((a, b) => a + b, 0) / fps.length;
+      const jb = win.reduce((a, e) => a + e.jbMs, 0) / win.length;
+      // Retraso acumulándose en la tele: bajar nivel y, si ya es muy alto, reiniciar
+      // la llamada (la cola de recepción solo se vacía empezando de cero).
+      if (jb > 450 && Date.now() - lastReset > 20000) {
+        lastReset = Date.now();
+        if (level < QUALITY.length - 1) { level++; applyLevel(); }
+        lastChange = Date.now();
+        report("phone", "latency-reset", { tv: tvCode, jb: Math.round(jb), to: QUALITY[level].name });
+        onStatus(`Reajustando la tele (iba con ${Math.round(jb)} ms de retraso)…`, false);
+        retry();
+        return;
+      }
       const target = QUALITY[level].fps;
       const sourceOk = sent >= target * 0.85;
       // Si al bajar de nivel la tele no ha mejorado, el límite no es la resolución
       // (es pintar en pantalla): volvemos al nivel anterior y no bajamos más.
+      // (Se compara la proporción pintados/enviados: en los niveles de 24 fps se
+      // envían menos imágenes, y lo que importa es que la tele no se quede atrás.)
+      const ratio = avg / sent;
       if (sourceOk && fpsAt[level - 1] != null && fpsAt[level] == null) {
-        fpsAt[level] = avg;
-        if (avg < fpsAt[level - 1] * 1.1) {
+        fpsAt[level] = ratio;
+        if (ratio < 0.9 && ratio < fpsAt[level - 1] * 1.1) {
           level--; floor = level; lastChange = Date.now(); applyLevel();
           report("phone", "quality-revert", { tv: tvCode, to: QUALITY[level].name, tvFps: avg });
           onStatus(`En la tele ✓ · calidad ${QUALITY[level].name}`, true);
           return;
         }
       }
-      if (sourceOk && avg < sent * 0.8 && level < floor) {
-        fpsAt[level] = avg;
+      if (sourceOk && (avg < sent * 0.8 || jb > 200) && level < floor) {
+        fpsAt[level] = ratio;
         level++; lastChange = Date.now(); applyLevel();
         report("phone", "quality-down", { tv: tvCode, to: QUALITY[level].name, tvFps: avg, sent });
         onStatus(`En la tele ✓ · calidad ${QUALITY[level].name} (la tele iba a ${Math.round(avg)} de ${Math.round(sent)} fps)`, true);
-      } else if (sourceOk && avg >= sent * 0.93 && Math.min(...fps) >= sent * 0.8 && level > 0 && Date.now() - lastChange > 30000) {
-        fpsAt[level] = avg;
+      } else if (sourceOk && avg >= sent * 0.93 && Math.min(...fps) >= sent * 0.8 && jb < 120 && level > 0 && Date.now() - lastChange > 20000) {
+        fpsAt[level] = ratio;
         level--; delete fpsAt[level]; lastChange = Date.now(); applyLevel();
         report("phone", "quality-up", { tv: tvCode, to: QUALITY[level].name, tvFps: avg, sent });
         onStatus(`En la tele ✓ · calidad ${QUALITY[level].name}`, true);
@@ -564,6 +585,7 @@ export function streamTo(peer, tvCode, getCanvas, consoleId, onStatus, quality =
     },
     get level() { return QUALITY[level].name; },
     get tvFps() { const l = tvSamples[tvSamples.length - 1]; return l ? l.shownFps : null; },
+    get tvJb() { const l = tvSamples[tvSamples.length - 1]; return l ? l.jbMs : null; },
     get tvSamples() { return tvSamples.length; },
     stop() {
       stopped = true;
@@ -632,5 +654,9 @@ export async function castPage(url, which = "dashcast") {
     const err = await ctx.requestSession();
     if (err) throw new Error(err === "cancel" ? "Cancelado" : `Chromecast: ${err}`);
   }
-  await ctx.getCurrentSession().sendMessage(r.ns, r.msg(url));
+  const session = ctx.getCurrentSession();
+  await session.sendMessage(r.ns, r.msg(url));
+  // Por si el volumen de la sesión de Cast estaba a cero o silenciado.
+  try { await session.setMute(false); } catch (e) { /* no soportado */ }
+  try { await session.setVolume(1); } catch (e) { /* no soportado */ }
 }

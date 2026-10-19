@@ -8,7 +8,7 @@
   <script>
     // Siempre la última versión: si la publicada no es la que se ha cargado
     // (caché del navegador o del service worker), se recarga una vez.
-    window.MGS_BUILD = "16";
+    window.MGS_BUILD = "17";
     (function () {
       if (MGS_BUILD.indexOf("__") === 0) return; // copia local de desarrollo
       fetch("version.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
@@ -25,7 +25,7 @@
     })();
   </script>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=16">
+  <link rel="stylesheet" href="css/style.css?v=17">
   <style>
     [hidden] { display: none !important; }
     html, body { background: #000; height: 100%; overflow: hidden; }
@@ -91,7 +91,10 @@
     const video = $("#video");
     // El código puede venir en la dirección (#abcde) cuando la abre el móvil vía Chromecast.
     const fromPhone = location.hash.length > 1; // abierta por el móvil vía Chromecast
-    const code = (location.hash.slice(1) || randomCode()).toLowerCase();
+    // #codigo o #codigo;opcion;opcion (p. ej. ;noaudio para el laboratorio)
+    const [hashCode, ...flagList] = location.hash.slice(1).split(";");
+    const flags = new Set(flagList);
+    const code = (hashCode || randomCode()).toLowerCase();
     $("#code").textContent = code.toUpperCase();
     if (fromPhone) {
       $("#howto").textContent = "Abierta desde tu móvil: se conecta solo, no hace falta escribir nada.";
@@ -118,8 +121,9 @@
         // (dos vídeos a la vez ahogan el procesador de la tele).
         if (currentCall && currentCall !== call) { try { currentCall.close(); } catch (e) {} }
         currentCall = call;
+        window.__mgsCall = call; // diagnóstico
         // La respuesta de la tele no limita el caudal: lo decide el móvil (su codificador).
-        call.answer(back.stream, { sdpTransform: sdp => boostBitrate(sdp, 2000, 10000) });
+        call.answer(flags.has("noback") ? undefined : back.stream, { sdpTransform: sdp => boostBitrate(sdp, 2000, 10000) });
         report("tv", "call", { code });
         call.peerConnection && (call.peerConnection.onconnectionstatechange = () =>
           report("tv", "pc-state", { code, st: call.peerConnection.connectionState }));
@@ -158,15 +162,27 @@
     if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) video.requestVideoFrameCallback(countFrames);
     let lagMax = 0, lagLast = performance.now();
     setInterval(() => { const now = performance.now(); lagMax = Math.max(lagMax, now - lagLast - 100); lagLast = now; }, 100);
-    // fps mostrados en ventana deslizante de 2 s, para el vídeo de vuelta.
+    // Cada segundo, para el vídeo de vuelta: fps mostrados (ventana de 2 s) y el
+    // retraso del búfer de recepción. Si ese búfer crece, la tele va sobrepasada y
+    // el retraso se acumula: el móvil baja la calidad o reinicia la llamada.
     const shownHist = [];
-    setInterval(() => {
+    let jbPrev = null;
+    setInterval(async () => {
       shownHist.push([performance.now(), presented]);
       while (shownHist.length > 3) shownHist.shift();
       if (shownHist.length >= 3 && !video.paused && video.srcObject) {
         const [t0, f0] = shownHist[0], [t1, f1] = shownHist[shownHist.length - 1];
-        back.set({ shownFps: (f1 - f0) / ((t1 - t0) / 1000), stats: 1 });
+        back.set({ shownFps: (f1 - f0) / ((t1 - t0) / 1000) });
       }
+      const pc = currentCall && currentCall.peerConnection;
+      if (!pc || pc.connectionState !== "connected") { jbPrev = null; return; }
+      (await pc.getStats()).forEach(r => {
+        if (r.type !== "inbound-rtp" || r.kind !== "video") return;
+        if (jbPrev && r.jitterBufferEmittedCount > jbPrev.n) {
+          back.set({ jbMs: 1000 * (r.jitterBufferDelay - jbPrev.d) / (r.jitterBufferEmittedCount - jbPrev.n) });
+        }
+        jbPrev = { d: r.jitterBufferDelay, n: r.jitterBufferEmittedCount };
+      });
     }, 1000);
 
     async function presentedFps() {
@@ -179,10 +195,12 @@
       if (video.srcObject !== stream) video.srcObject = stream;
       lowLatencyReceivers(call.peerConnection);
       $("#wait").hidden = true;
-      if (isCast) routeAudioWebAudio(stream);
+      if (isCast && !flags.has("noaudio")) routeAudioWebAudio(stream);
+      if (flags.has("noaudio")) stream.getAudioTracks().forEach(t => { t.enabled = false; });
       // El reproductor debe seguir "sonando" para que el audio de WebRTC fluya hacia
       // Web Audio: sin silenciar, pero a volumen 0 cuando el sonido sale por Web Audio.
-      video.muted = false;
+      // ;noaudio → el sonido sale por el móvil: aquí ni se reproduce ni se procesa.
+      video.muted = flags.has("noaudio");
       video.volume = isCast && audioSrc ? 0 : 1;
       video.play().catch(err => {
         if (err && err.name === "AbortError") return; // otra carga en curso; no es un bloqueo
@@ -310,7 +328,7 @@
       if (viaBack !== backKeys) { backKeys = viaBack; back.set({ keys: viaBack }); back.drawNow(); }
       requestAnimationFrame(poll);
     }
-    poll();
+    if (!flags.has("nopoll")) poll();
 
     // Cada 5 s: lo que de verdad pinta la tele (fps mostrados, coste de decodificar,
     // búfer, pérdidas). Va a la telemetría, y el móvil lo usa para ajustar la calidad.
@@ -349,7 +367,7 @@
     start();
 
     // Pitido al abrir: si se oye, la salida de audio de la tele funciona.
-    beep().then(r => report("tv", "beep", { code, r }));
+    if (!flags.has("noaudio")) beep().then(r => report("tv", "beep", { code, r }));
 
     // Autodiagnóstico al abrir: ¿funciona WebRTC dentro de esta tele?
     selfTest().then(r => {

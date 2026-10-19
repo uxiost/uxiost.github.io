@@ -1,11 +1,11 @@
 // Consola: ejecuta el emulador de PS1 (EmulatorJS, núcleo PCSX-ReARMed en
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
-import * as store from "./storage.js?v=16";
-import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=16";
-import { attachTouchPad, PAD_HTML } from "./padui.js?v=16";
-import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=16";
-import { installAudioTap, setLocalMuted, streamTo, castPage } from "./stream.js?v=16";
+import * as store from "./storage.js?v=17";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=17";
+import { attachTouchPad, PAD_HTML } from "./padui.js?v=17";
+import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=17";
+import { installAudioTap, setLocalMuted, streamTo, castPage } from "./stream.js?v=17";
 
 // Antes de que arranque el emulador: así podemos mandar su audio a la tele.
 installAudioTap();
@@ -765,14 +765,24 @@ function tvStatus(msg, ok) {
   if (ok) toast(msg);
 }
 
-async function startTv(tvCode) {
+// ¿Dónde suena el juego? En el Chromecast de las LG el audio de la tele no sale por
+// ninguna vía probada (WebRTC, Web Audio, MediaSource), así que por defecto suena el móvil.
+function soundOnTv(viaCast) {
+  const v = $("#soundOut").value;
+  return v === "tv" || (v === "auto" && !viaCast);
+}
+
+let tvViaCast = false;
+async function startTv(tvCode, viaCast = tvViaCast) {
   tvCode = tvCode.trim().toLowerCase();
   if (!tvCode) return;
   stopTv();
+  tvViaCast = viaCast;
+  localStorage.setItem("mgs.tvcast", viaCast ? "1" : "0");
   localStorage.setItem("mgs.tv", tvCode);
   document.body.classList.add("tvstream"); // zona de juego siempre 4:3: se captura sin copiar
   $("#tvStop").hidden = false;
-  if ($("#muteLocal").checked) setLocalMuted(true);
+  setLocalMuted(soundOnTv(viaCast));
   await peerReady();
   const canvas = () => (started && window.EJS_emulator && window.EJS_emulator.started ? window.EJS_emulator.canvas : null);
   tvStream = streamTo(peer, tvCode, canvas, peer.id, tvStatus, $("#tvQuality").value, {
@@ -793,7 +803,7 @@ function stopTv() {
 
 $("#tvForm").onsubmit = async e => {
   e.preventDefault();
-  await startTv($("#tvCode").value);
+  await startTv($("#tvCode").value, false);
   await playAfterTvConnect();
 };
 
@@ -817,15 +827,20 @@ $("#tvQuality").onchange = e => {
   try { localStorage.setItem("mgs.tvq", e.target.value); } catch (err) { /* sin almacenamiento */ }
   if (tvStream) tvStream.setQuality(e.target.value);
 };
-$("#muteLocal").onchange = e => setLocalMuted(!!tvStream && e.target.checked);
+try { $("#soundOut").value = localStorage.getItem("mgs.sound") || "auto"; } catch (e) { /* sin almacenamiento */ }
+$("#soundOut").onchange = e => {
+  try { localStorage.setItem("mgs.sound", e.target.value); } catch (err) { /* sin almacenamiento */ }
+  if (tvStream) setLocalMuted(soundOnTv(tvViaCast));
+};
 $("#castBtn").onclick = async () => {
   const tvCode = randomCode();
-  const url = new URL(`screen.html?t=${Date.now()}#${tvCode}`, location.href).href;
+  // ;noaudio: la tele no reproduce sonido (suena el móvil) y ahorra CPU.
+  const url = new URL(`screen.html?t=${Date.now()}#${tvCode}${soundOnTv(true) ? "" : ";noaudio"}`, location.href).href;
   try {
     tvStatus("Elige tu tele en la lista…");
     await castPage(url, $("#castRcv").value);
     tvStatus("Abriendo la pantalla en la tele…");
-    await startTv(tvCode);
+    await startTv(tvCode, true);
     await playAfterTvConnect();
   } catch (err) {
     console.error(err);
@@ -852,7 +867,7 @@ renderDiscs();
 startPeer(codeForPeer());
 if (localStorage.getItem("mgs.tv")) {
   $("#tvCode").value = localStorage.getItem("mgs.tv");
-  startTv(localStorage.getItem("mgs.tv"));
+  startTv(localStorage.getItem("mgs.tv"), localStorage.getItem("mgs.tvcast") === "1");
 }
 
 const autoDisc = params.get("disc");

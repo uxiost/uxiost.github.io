@@ -1,13 +1,13 @@
 // Telemetría y diagnóstico: la tele y el móvil mandan su estado (solo datos
-// técnicos: navegador, fps, resolución, caudal, errores) a un buzón público de
-// webhook.site. Sirve para depurar a distancia y, además, es el canal por el que
-// el móvil se entera de cuántos fotogramas pinta de verdad la tele (el Chromecast
-// de las LG no tiene canales de datos WebRTC para decírselo directamente).
-// (Antes era ntfy.sh, pero su plan gratuito corta tras unos cientos de mensajes al día.)
+// técnicos: navegador, fps, resolución, caudal, errores) a un canal de ntfy.sh.
+// ntfy limita unos cientos de mensajes al día por conexión, así que se agrupa
+// todo en un mensaje por minuto (y uno inmediato si hay un error). Las pruebas
+// automáticas (navegador controlado) no envían nada, para no gastar el cupo.
+// (webhook.site se descartó: corta a los 50 mensajes.)
 
-export const HOOK = "96afd25f-a7f1-4259-88e0-7b2df6c7646e";
-const POST_URL = `https://webhook.site/${HOOK}`;
-const READ_URL = `https://webhook.site/token/${HOOK}/requests`;
+const TOPIC = "mgsweb-tel-5c1d9a27e3";
+const POST_URL = `https://ntfy.sh/${TOPIC}`;
+const OFF = typeof navigator !== "undefined" && navigator.webdriver;
 
 const log = [];
 const queue = [];
@@ -24,43 +24,38 @@ function safe(o) {
   try { return JSON.stringify(o).slice(0, 300); } catch (e) { return String(o); }
 }
 
-// Se acumula y se envía por lotes cada 5 s (o al cerrar la página).
 export function report(role, stage, data = {}) {
+  if (OFF) return;
   const key = role + stage + JSON.stringify(data);
   if (key === lastKey) return; // repetido
   lastKey = key;
-  if (total++ > 3000) return;
-  const entry = { role, stage, t: Date.now(), ...data };
-  if (/error|blocked|failed/i.test(stage)) entry.log = log.slice(-8);
+  if (total++ > 2000) return;
+  const entry = { r: role, s: stage, t: Math.round(Date.now() / 1000), ...data };
+  const urgent = /error|blocked|failed|quality|selftest|beep|mode/i.test(stage);
+  if (urgent) entry.log = log.slice(-6);
   queue.push(entry);
-  if (queue.length >= 25) flush();
+  if (urgent) setTimeout(flush, 3000); // agrupar lo que llegue a la vez
 }
 
+// ntfy acepta hasta 4 KB por mensaje: se trocea si hace falta.
 function flush(beacon) {
-  if (!queue.length) return;
-  const body = JSON.stringify(queue.splice(0, queue.length));
-  if (beacon && navigator.sendBeacon) {
-    navigator.sendBeacon(POST_URL, new Blob([body], { type: "text/plain" }));
-  } else {
-    fetch(POST_URL, { method: "POST", body, keepalive: body.length < 60000 }).catch(() => {});
+  while (queue.length) {
+    const batch = [];
+    let size = 2;
+    while (queue.length && size + JSON.stringify(queue[0]).length + 1 < 3900) {
+      const e = queue.shift();
+      size += JSON.stringify(e).length + 1;
+      batch.push(e);
+    }
+    if (!batch.length) { queue.shift(); continue; } // una entrada enorme: se descarta
+    const body = JSON.stringify(batch);
+    if (beacon && navigator.sendBeacon) navigator.sendBeacon(POST_URL, body);
+    else fetch(POST_URL, { method: "POST", body, keepalive: true }).catch(() => {});
   }
 }
-setInterval(flush, 5000);
-addEventListener("pagehide", () => flush(true));
-
-// Últimas entradas que cumplan `filter` (p. ej. el móvil leyendo las de su tele).
-export async function readRecent(filter, perPage = 20) {
-  const r = await fetch(`${READ_URL}?sorting=newest&per_page=${perPage}`, { cache: "no-store" });
-  if (!r.ok) throw new Error("telemetría " + r.status);
-  const j = await r.json();
-  const out = [];
-  for (const req of j.data || []) {
-    try {
-      const v = JSON.parse(req.content);
-      for (const e of Array.isArray(v) ? v : [v]) if (filter(e)) out.push(e);
-    } catch (e) { /* entrada ajena */ }
-  }
-  return out.sort((a, b) => b.t - a.t);
+if (!OFF) {
+  setInterval(flush, 60000);
+  addEventListener("pagehide", () => flush(true));
 }
 
 // Pruebas de WebRTC dentro de este mismo dispositivo: canal de datos y vídeo.
@@ -92,6 +87,17 @@ export async function selfTest() {
   for (let i = 0; i < 30_000_000; i++) { x = (x * 1103515245 + 12345) | 0; acc ^= x >>> 7; }
   out.benchMs = Math.round(performance.now() - t0) + (acc === 0.5 ? "" : "");
   out.gamepadApi = typeof navigator.getGamepads;
+  // Tamaño real al que pinta la página (en la tele, coste de componer en software).
+  out.viewport = [innerWidth, innerHeight, devicePixelRatio, screen.width, screen.height];
+  // Qué puede reproducir el reproductor multimedia (hardware) de esta pantalla.
+  if (typeof MediaSource !== "undefined") {
+    out.mse = {};
+    for (const [k, t] of [["h264", 'video/mp4; codecs="avc1.42E01F"'], ["h264main", 'video/mp4; codecs="avc1.4D401F"'],
+      ["vp9mp4", 'video/mp4; codecs="vp09.00.10.08"'], ["vp9webm", 'video/webm; codecs="vp9"'], ["vp8webm", 'video/webm; codecs="vp8"'],
+      ["aac", 'audio/mp4; codecs="mp4a.40.2"'], ["opusmp4", 'audio/mp4; codecs="opus"'], ["opuswebm", 'audio/webm; codecs="opus"']]) {
+      out.mse[k] = MediaSource.isTypeSupported(t);
+    }
+  }
   out.mseOpus = typeof MediaSource !== "undefined" && MediaSource.isTypeSupported('audio/webm; codecs="opus"');
   out.recOpus = typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported("audio/webm;codecs=opus");
   out.loopData = await loop(false).catch(e => "FAIL " + e.name + ": " + e.message);

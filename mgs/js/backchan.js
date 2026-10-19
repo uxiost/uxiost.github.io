@@ -12,7 +12,7 @@
 //   16–23 fps mostrados × 4
 //   24–31 ms de decodificación × 4
 //   32–47 botones (máscara de 16 bits, índices RetroPad)
-//   48–55 marcas (bit 0: hay estadísticas)
+//   48–55 retraso del búfer de recepción / 8 (ms; 0–2040)
 //   56–63 suma de comprobación (bytes 1–6 módulo 256)
 
 const N = 8, CELL = 8, SIZE = N * CELL;
@@ -22,7 +22,7 @@ export function makeBackChannel(fps = 15) {
   const c = document.createElement("canvas");
   c.width = c.height = SIZE;
   const g = c.getContext("2d", { alpha: false });
-  const fields = { seq: 0, shownFps: 0, decMs: 0, keys: 0, stats: 0 };
+  const fields = { seq: 0, shownFps: 0, decMs: 0, keys: 0, jbMs: 0 };
   const draw = () => {
     fields.seq = (fields.seq + 1) & 255;
     const bytes = [
@@ -32,7 +32,7 @@ export function makeBackChannel(fps = 15) {
       Math.min(255, Math.round(fields.decMs * 4)),
       (fields.keys >> 8) & 255,
       fields.keys & 255,
-      fields.stats ? 1 : 0,
+      Math.min(255, Math.round(fields.jbMs / 8)),
     ];
     bytes.push(bytes.slice(1, 7).reduce((a, b) => a + b, 0) & 255);
     for (let i = 0; i < 64; i++) {
@@ -52,7 +52,7 @@ export function makeBackChannel(fps = 15) {
   };
 }
 
-// Lee el canal desde un MediaStream recibido. cb({seq, shownFps, decMs, keys, stats}).
+// Lee el canal desde un MediaStream recibido. cb({seq, shownFps, decMs, keys, jbMs, stats}).
 export function readBackChannel(stream, cb) {
   const v = document.createElement("video");
   v.muted = true;
@@ -95,7 +95,7 @@ export function readBackChannel(stream, cb) {
     if ((bytes.slice(1, 7).reduce((a, b) => a + b, 0) & 255) !== bytes[7]) return;
     if (bytes[1] === last) return; // imagen repetida
     last = bytes[1];
-    cb({ seq: bytes[1], shownFps: bytes[2] / 4, decMs: bytes[3] / 4, keys: (bytes[4] << 8) | bytes[5], stats: bytes[6] & 1 });
+    cb({ seq: bytes[1], shownFps: bytes[2] / 4, decMs: bytes[3] / 4, keys: (bytes[4] << 8) | bytes[5], jbMs: bytes[6] * 8, stats: bytes[2] > 0 });
   };
   // Temporizador (no requestVideoFrameCallback: este vídeo no se pinta en pantalla
   // y esa llamada solo salta con vídeos que se componen).
