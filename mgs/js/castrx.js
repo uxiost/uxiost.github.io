@@ -17,16 +17,19 @@ export async function castReceiverTransport() {
   const listeners = [];
   let sender = null, ns = null;
   const deliver = (n, ev) => {
-    sender = ev.senderId;
-    ns = n;
     let data = ev.data;
     if (typeof data === "string") { try { data = JSON.parse(data); } catch (e) { return; } }
-    for (const l of listeners) l(data);
+    // Las consultas de diagnóstico (otro equipo de la red mirando la tele) no
+    // cambian a quién van las estadísticas: siguen yendo al móvil.
+    if (!(data && (data.t === "dump" || data.t === "dbg"))) { sender = ev.senderId; ns = n; }
+    for (const l of listeners) l(data, { from: ev.senderId, ns: n });
   };
   return {
-    send(obj) {
-      if (!sender) return;
-      try { ctx.sendCustomMessage(ns, sender, obj); } catch (e) { /* emisor desconectado */ }
+    // `to`: responder a un emisor concreto (el que preguntó).
+    send(obj, to) {
+      const dst = to ? to.from : sender;
+      if (!dst) return;
+      try { ctx.sendCustomMessage(to ? to.ns : ns, dst, obj); } catch (e) { /* emisor desconectado */ }
     },
     onMessage(cb) {
       listeners.push(cb);

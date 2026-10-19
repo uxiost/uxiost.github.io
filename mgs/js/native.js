@@ -16,7 +16,7 @@
 //   tele → móvil  {t:"keys", k}                 botones del mando de la tele, al cambiar
 //   tele → móvil  {t:"key"}                     pide una imagen clave
 
-import { fromB64 } from "./fmp4.js?v=23";
+import { fromB64 } from "./fmp4.js?v=24";
 
 
 // ---------------------------------------------------------------- tele
@@ -189,15 +189,22 @@ export function startNativeReceiver(transport, video, opts = {}) {
   // no guardar más búfer del necesario (la memoria de la tele es escasa).
   // Colchón objetivo (s): pequeño, y crece solo si el vídeo se queda sin datos
   // (llegan a tirones); con el tiempo vuelve a bajar.
-  let target = 0.1, lastStall = 0, ownSeek = 0;
+  let target = 0.1, lastStall = 0, ownSeek = 0, lastSeeked = 0;
   const lagHist = [];
   const note = (...e) => { if (cur) { cur.log.push([Math.round(performance.now()), ...e]); if (cur.log.length > 200) cur.log.shift(); } };
   const seek = t => { ownSeek = performance.now(); note("seek", Math.round((t - video.currentTime) * 1000)); video.currentTime = t; };
   for (const ev of ["waiting", "stalled", "seeked", "ratechange"]) video.addEventListener(ev, () => note(ev, Math.round(video.currentTime * 1000)));
+  // En la LG real cada salto (currentTime = …) tarda ~1 s en completarse, con la
+  // imagen parada: saltar para alcanzar el directo añade el mismo retraso que
+  // quita, y se entraba en un bucle de saltos sin imagen. Mientras un salto se
+  // asienta no se toca nada; para alcanzar el directo se acelera, y solo se salta
+  // si se va muy por detrás.
+  video.addEventListener("seeked", () => { lastSeeked = performance.now(); lagHist.length = 0; });
+  const settling = () => video.seeking || performance.now() - Math.max(lastSeeked, ownSeek) < 1500;
   video.addEventListener("waiting", () => {
     const s = cur;
     // Los saltos que hacemos nosotros también avisan "waiting": esos no cuentan.
-    if (!s || !s.started || performance.now() - ownSeek < 1000) return;
+    if (!s || !s.started || video.seeking || performance.now() - ownSeek < 2500) return;
     s.stalls = (s.stalls || 0) + 1;
     target = Math.min(0.35, target + 0.04);
     lastStall = performance.now();
@@ -217,6 +224,7 @@ export function startNativeReceiver(transport, video, opts = {}) {
       return;
     }
     const now = performance.now();
+    if (settling()) { s.ctMovedAt = now; s.settles = (s.settles || 0) + 1; return; }
     // ¿Atascada? (la imagen no avanza aunque hay datos por delante): primero se
     // salta a la siguiente imagen clave; si sigue igual, se empieza de nuevo (el
     // móvil vuelve a mandar el inicio al ver que la tele pide "restart").
@@ -236,12 +244,13 @@ export function startNativeReceiver(transport, video, opts = {}) {
     if (now - lastStall > 10000 && target > 0.08) { target = Math.max(0.08, target - 0.01); lastStall = now - 9000; }
     const lag = r.end - video.currentTime;
     lagHist.push(lag);
-    if (lagHist.length > 10) lagHist.shift();
+    if (lagHist.length > 30) lagHist.shift(); // 3 s: en la LG la posición se congela hasta ~1 s y luego salta (el reloj se actualiza a golpes): el mínimo de 3 s es el retraso de verdad
     const minLag = Math.min(...lagHist);
     if (video.currentTime < r.start - 0.01) {
       seek(r.start);
-    } else if ((lag > 1.5 || (lagHist.length >= 10 && minLag > target + 0.5)) && !s.wantJump) {
-      // Muy por detrás: pedir imagen clave y saltar a ella cuando llegue.
+    } else if ((lag > 3 || (lagHist.length >= 10 && minLag > 2)) && !s.wantJump) {
+      // Muy por detrás (p. ej. tras un corte de la red): pedir imagen clave y
+      // saltar a ella cuando llegue.
       s.wantJump = true;
       transport.send({ t: "key" });
       setTimeout(() => { s.wantJump = false; }, 3000);
@@ -250,7 +259,7 @@ export function startNativeReceiver(transport, video, opts = {}) {
       // adelantado, así que no se queda sin datos), sin saltos ni cortes.
       // Con el mínimo del último segundo: el retraso instantáneo sube y baja con
       // cada imagen que llega y haría oscilar la velocidad.
-      const want = opts.noRate ? 1 : minLag > target + 0.06 ? Math.min(1.1, 1 + (minLag - target) * 0.5) : minLag < target + 0.02 ? 1 : video.playbackRate;
+      const want = opts.noRate ? 1 : minLag > target + 0.06 ? Math.min(1.25, 1 + (minLag - target) * 0.5) : minLag < target + 0.02 ? 1 : video.playbackRate;
       if (Math.abs(video.playbackRate - want) > 0.01) { video.playbackRate = want; s.rateChanges = (s.rateChanges || 0) + 1; }
     }
     s.target = target;
@@ -289,8 +298,10 @@ export function startNativeReceiver(transport, video, opts = {}) {
     lastShown = presented; lastShownT = now;
     const r = bufEnd();
     const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : {};
-    const dec = q.totalVideoFrames != null ? (q.totalVideoFrames - lastDec) / dt : null;
-    lastDec = q.totalVideoFrames || 0;
+    // (La LG pone el contador a 0 durante los saltos: entonces no se cuenta.)
+    const total = q.totalVideoFrames;
+    const dec = total != null && total >= lastDec ? (total - lastDec) / dt : null;
+    if (total || !lastDec) lastDec = total || 0;
     const adv = (video.currentTime - lastCt) / dt;
     lastCt = video.currentTime;
     const ends = {};
@@ -314,10 +325,25 @@ export function startNativeReceiver(transport, video, opts = {}) {
     if (opts.onStats) opts.onStats(st);
   }, 1000);
 
+  const ranges = b => { const r = []; if (b) for (let i = 0; i < b.length; i++) r.push([Math.round(b.start(i) * 1000), Math.round(b.end(i) * 1000)]); return r; };
   return {
     get presented() { return presented; },
     get active() { return !!cur; },
     get state() { return cur; },
+    // Todo el estado del reproductor, para mirar la tele desde otro equipo.
+    dump() {
+      const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : {};
+      const s = cur;
+      return {
+        video: { rs: video.readyState, ns: video.networkState, paused: video.paused, ct: Math.round(video.currentTime * 1000), rate: video.playbackRate, muted: video.muted,
+          res: [video.videoWidth, video.videoHeight], err: video.error && (video.error.code + " " + video.error.message), buffered: ranges(video.buffered),
+          q: { total: q.totalVideoFrames, dropped: q.droppedVideoFrames, corrupted: q.corruptedVideoFrames } },
+        target, presented, selfRestarts,
+        s: s && { id: s.id, ms: s.ms.readyState, started: s.started, err: s.err, waitKey: s.waitKey, wantJump: s.wantJump, jumps: s.jumps, lost: s.lost, drops: s.drops, stalls: s.stalls, appended: s.appended,
+          tracks: Object.fromEntries(Object.entries(s.tracks).map(([k, tr]) => [k, { mime: tr.mime, buffered: tr.sb ? ranges(tr.sb.buffered) : null, q: tr.queue.length, lastN: tr.lastN, segs: tr.segs, extra: tr.extra, full: tr.full, updating: tr.sb && tr.sb.updating }])),
+          log: s.log.slice(-60) },
+      };
+    },
     stop() { teardown(); clearInterval(keeper); clearInterval(statsIv); clearInterval(keysIv); },
   };
 }

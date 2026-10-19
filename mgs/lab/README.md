@@ -42,3 +42,6 @@ software con muy poca CPU (no es lo que pasa en la tele).
 | el mando de la tele llega al móvil por el vídeo de vuelta | sí |
 
 El flujo `.github/workflows/mgs-lab.yml` lo ejecuta en cada cambio de `mgs-web/`.
+
+Publicar y leer la telemetría: `tools/deploy.sh "mensaje"` y `tools/telemetry.sh 2h`
+(ver `HANDOFF.md`).

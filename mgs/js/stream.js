@@ -3,9 +3,9 @@
 // su navegador o en su Chromecast integrado mediante un receptor público que
 // carga páginas web (DashCast o URL Cast Receiver), sin registrar ninguna app.
 
-import { PEER_PREFIX } from "./protocol.js?v=23";
-import { report } from "./diag.js?v=23";
-import { readBackChannel } from "./backchan.js?v=23";
+import { PEER_PREFIX } from "./protocol.js?v=24";
+import { report } from "./diag.js?v=24";
+import { readBackChannel } from "./backchan.js?v=24";
 
 export const TV_PREFIX = PEER_PREFIX + "tv-";
 
@@ -662,9 +662,10 @@ export async function castPage(url, which = "dashcast", { force = false, fresh =
   }
   const session = ctx.getCurrentSession();
   await session.sendMessage(r.ns, r.msg(url, force));
-  // Por si el volumen de la sesión de Cast estaba a cero o silenciado.
+  // Por si la sesión de Cast estaba silenciada. El volumen no se toca: en las teles
+  // con Chromecast integrado es el volumen general de la tele (setVolume(1) la
+  // ponía al máximo).
   try { await session.setMute(false); } catch (e) { /* no soportado */ }
-  try { await session.setVolume(1); } catch (e) { /* no soportado */ }
   return { session, ns: r.ns };
 }
 

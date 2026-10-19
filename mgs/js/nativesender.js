@@ -10,7 +10,7 @@
 //   readable: el ReadableStream de un MediaStreamTrackProcessor (de vídeo o de audio)
 //   message: {t:"pending", n} {t:"key"} {t:"restart"} {t:"bitrate", kbps} {t:"stop"}
 
-import { initSegment, fragment, mimeFor, toB64 } from "./fmp4.js?v=23";
+import { initSegment, fragment, mimeFor, toB64 } from "./fmp4.js?v=24";
 
 // Bytes por mensaje antes de base64. En la LG real, los mensajes de ~60 KB los
 // rechazaba el Chromecast ("invalid_parameter") y se perdían imágenes clave: se
