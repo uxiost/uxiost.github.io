@@ -16,7 +16,7 @@
 //   tele → móvil  {t:"keys", k}                 botones del mando de la tele, al cambiar
 //   tele → móvil  {t:"key"}                     pide una imagen clave
 
-import { fromB64 } from "./fmp4.js?v=21";
+import { fromB64 } from "./fmp4.js?v=22";
 
 
 // ---------------------------------------------------------------- tele
@@ -41,7 +41,8 @@ export function startNativeReceiver(transport, video, opts = {}) {
   let presented = 0, lastShown = 0, lastShownT = performance.now();
   let muted = !!opts.muted;
   const counter = () => { presented++; video.requestVideoFrameCallback(counter); };
-  if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(counter);
+  // (opts.noRvfc: el laboratorio simula una tele con plano de vídeo por hardware.)
+  if (video.requestVideoFrameCallback && !opts.noRvfc) video.requestVideoFrameCallback(counter);
 
   const teardown = () => {
     if (!cur) return;
@@ -246,14 +247,24 @@ export function startNativeReceiver(transport, video, opts = {}) {
   }, 16);
 
   // Estadísticas para el móvil (y para la telemetría).
+  // Tres medidas de "se ve": imágenes pintadas (requestVideoFrameCallback),
+  // imágenes decodificadas y avance de la reproducción. En muchas teles el vídeo
+  // va por un plano de vídeo por hardware y el navegador no ve las imágenes
+  // pintadas: ahí cuentan las otras dos.
+  let lastDec = 0, lastCt = 0;
   const statsIv = setInterval(() => {
     const s = cur;
     if (!s) return;
     const now = performance.now();
-    const shown = (presented - lastShown) / ((now - lastShownT) / 1000);
+    const dt = (now - lastShownT) / 1000;
+    const shown = (presented - lastShown) / dt;
     lastShown = presented; lastShownT = now;
     const r = bufEnd();
     const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : {};
+    const dec = q.totalVideoFrames != null ? (q.totalVideoFrames - lastDec) / dt : null;
+    lastDec = q.totalVideoFrames || 0;
+    const adv = (video.currentTime - lastCt) / dt;
+    lastCt = video.currentTime;
     const ends = {};
     const qs = {}, segs = {};
     for (const [k, tr] of Object.entries(s.tracks)) {
@@ -264,6 +275,7 @@ export function startNativeReceiver(transport, video, opts = {}) {
     }
     const st = {
       t: "stats", id: s.id, shown: Math.round(shown * 10) / 10,
+      dec: dec == null ? null : Math.round(dec * 10) / 10, adv: Math.round(adv * 100) / 100,
       lag: r ? Math.round((r.end - video.currentTime) * 1000) : null,
       dropped: q.droppedVideoFrames, rs: video.readyState, paused: video.paused, muted: video.muted,
       res: [video.videoWidth, video.videoHeight], jumps: s.jumps, drops: s.drops || 0, stalls: s.stalls || 0, target: Math.round(target * 1000), rate: Math.round(video.playbackRate * 100) / 100, rateChanges: s.rateChanges || 0,
@@ -443,6 +455,10 @@ const NATIVE_START = 2;
 // Saluda a la tele por `transport`; si contesta y hay códecs comunes, empieza a
 // enviar. Devuelve el emisor (con .stats, .stop()…) o null si no es posible.
 // opts: { getCanvas, getAudioTrack, onStatus(msg, ok), onTvKeys, width, height, fps, waitMs, report }
+// ¿La tele está mostrando el vídeo? (sirve aunque no pueda contar imágenes pintadas)
+export function tvShowing(tv) {
+  return !!tv && (tv.shown >= 3 || tv.dec >= 3 || (tv.adv >= 0.5 && tv.rs >= 2));
+}
 export async function startNative(transport, opts) {
   const report = opts.report || (() => {});
   const hello = await new Promise(resolve => {
@@ -485,7 +501,10 @@ export async function startNative(transport, opts) {
     const sentFps = (st.sentFrames - lastSent) / Math.max(0.5, (Date.now() - lastAt) / 1000);
     lastSent = st.sentFrames; lastAt = Date.now();
     st.sentFps = Math.round(sentFps * 10) / 10;
-    const struggling = tv.shown < Math.min(fps, sentFps) * 0.8 || jumps > 0 || drops > 0 || st.pending > 20;
+    // Lo que pinta la tele; si no lo puede medir (plano de vídeo por hardware), lo
+    // que decodifica; si tampoco, solo cuentan saltos, descartes y la cola.
+    const tvFps = tv.shown > 0 ? tv.shown : tv.dec > 0 ? tv.dec : null;
+    const struggling = (tvFps != null && tvFps < Math.min(fps, sentFps) * 0.8) || jumps > 0 || drops > 0 || st.pending > 20;
     if (struggling) { bad++; good = 0; } else { good++; bad = 0; }
     const since = Date.now() - lastChange;
     if (bad >= 3 && level < NATIVE_KBPS.length - 1 && since > 4000) {
@@ -498,7 +517,7 @@ export async function startNative(transport, opts) {
     if (ticks % 20 === 5) {
       report("phone", "native-tick", { level, kbps: NATIVE_KBPS[level], sent: st.sentFrames, dropped: st.dropped, flowDrops: st.flowDrops, pending: st.pending, msgs: st.msgs, enc: st.encMs, err: st.err, aErr: st.aErr, sendErr: st.sendErr, withAudio: st.withAudio, sentFps: st.sentFps, hw: codecs.video.hw, nv: st.nv, na: st.na, repeats: st.repeats, aFilled: st.aFilled, aSkipped: st.aSkipped, vTs: st.vTs, aTs: st.aTs, nowTs: st.nowTs, tv: { ...tv, t: undefined } });
     }
-    if (opts.onStatus) opts.onStatus(`En la tele ✓ · directo ${codecs.video.height}p · ${Math.round(tv.shown)} fps · ${Math.round(NATIVE_KBPS[level] / 100) / 10} Mbps`, true);
+    if (opts.onStatus) opts.onStatus(`En la tele ✓ · directo ${codecs.video.height}p${tvFps != null ? " · " + Math.round(tvFps) + " fps" : ""} · ${Math.round(NATIVE_KBPS[level] / 100) / 10} Mbps`, true);
   };
   sender.hello = hello;
   sender.lastTvStatsAt = Date.now();

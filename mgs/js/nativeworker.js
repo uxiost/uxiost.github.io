@@ -2,7 +2,7 @@
 // flujos de imágenes y audio del hilo principal, y le devuelve los mensajes para
 // la tele.
 
-import { createSender } from "./nativesender.js?v=21";
+import { createSender } from "./nativesender.js?v=22";
 
 let sender = null;
 onmessage = e => {

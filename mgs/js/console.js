@@ -1,13 +1,13 @@
 // Consola: ejecuta el emulador de PS1 (EmulatorJS, núcleo PCSX-ReARMed en
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
-import * as store from "./storage.js?v=21";
-import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=21";
-import { attachTouchPad, PAD_HTML } from "./padui.js?v=21";
-import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=21";
-import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=21";
-import { startNative } from "./native.js?v=21";
-import { report } from "./diag.js?v=21";
+import * as store from "./storage.js?v=22";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=22";
+import { attachTouchPad, PAD_HTML } from "./padui.js?v=22";
+import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=22";
+import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=22";
+import { startNative, tvShowing } from "./native.js?v=22";
+import { report } from "./diag.js?v=22";
 
 // Antes de que arranque el emulador: así podemos mandar su audio a la tele.
 installAudioTap();
@@ -886,11 +886,11 @@ async function tryNative(cast, tvCode) {
     const visible = document.visibilityState === "visible";
     if (visible && gameCanvas() && Date.now() - sender.lastTvStatsAt > 10000) return fallback("sin respuesta de la tele");
     const tv = st.tv;
-    if (visible && gameCanvas() && Date.now() - t0 > 8000 && (!tv || tv.shown < 3)) blind++; else blind = 0;
+    if (visible && gameCanvas() && Date.now() - t0 > 8000 && !tvShowing(tv)) blind++; else blind = 0;
     if (blind >= 4) fallback("la tele no muestra imagen: " + (tv && tv.err || "sin fotogramas"));
   }, 2000);
   setTimeout(() => {
-    if (tvNative !== sender || !sender.stats.tv || sender.stats.tv.shown < 3) return;
+    if (tvNative !== sender || !tvShowing(sender.stats.tv)) return;
     if (soundOnTv(true)) {
       toastAction("En la tele en directo, con sonido. ¿No se oye en la tele?", "Sonido en el móvil", () => {
         $("#soundOut").value = "phone";
