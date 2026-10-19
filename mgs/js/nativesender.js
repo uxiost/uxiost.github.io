@@ -10,7 +10,7 @@
 //   readable: el ReadableStream de un MediaStreamTrackProcessor (de vídeo o de audio)
 //   message: {t:"pending", n} {t:"key"} {t:"restart"} {t:"bitrate", kbps} {t:"stop"}
 
-import { initSegment, fragment, mimeFor, toB64 } from "./fmp4.js?v=20";
+import { initSegment, fragment, mimeFor, toB64 } from "./fmp4.js?v=21";
 
 const CHUNK = 45000; // bytes por mensaje antes de base64 (Cast: máx. 64 KB por mensaje)
 

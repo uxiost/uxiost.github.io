@@ -16,7 +16,7 @@
 //   tele → móvil  {t:"keys", k}                 botones del mando de la tele, al cambiar
 //   tele → móvil  {t:"key"}                     pide una imagen clave
 
-import { fromB64 } from "./fmp4.js?v=20";
+import { fromB64 } from "./fmp4.js?v=21";
 
 
 // ---------------------------------------------------------------- tele
@@ -112,7 +112,9 @@ export function startNativeReceiver(transport, video, opts = {}) {
       s.appended++;
     } catch (e) {
       s.err = String(e);
-      // Búfer lleno o error: vaciar lo pendiente y esperar una imagen clave.
+      // Búfer lleno o error: vaciar lo pendiente, liberar lo ya visto y esperar
+      // una imagen clave.
+      if (e && e.name === "QuotaExceededError") tr.full = true;
       tr.queue.length = 0;
       if (tr.k === "v") { s.waitKey = true; transport.send({ t: "key" }); }
     }
@@ -228,9 +230,10 @@ export function startNativeReceiver(transport, video, opts = {}) {
     for (const tr of Object.values(s.tracks)) {
       const b = tr.sb.buffered;
       // Borrar lo ya visto de tarde en tarde (borrar mientras suena puede dar un
-      // tirón): al pasar de 30 s, se dejan los últimos 10.
-      if (!tr.sb.updating && b.length && video.currentTime - b.start(0) > 30) {
-        try { tr.sb.remove(0, video.currentTime - 10); note("remove", tr.k); } catch (e) { /* luego */ }
+      // tirón): al pasar de 15 s, se dejan los últimos 5 (las teles tienen poca
+      // memoria para esto).
+      if (!tr.sb.updating && b.length && video.currentTime - b.start(0) > (tr.full ? 3 : 15)) {
+        try { tr.sb.remove(0, video.currentTime - (tr.full ? 1 : 5)); tr.full = false; note("remove", tr.k); } catch (e) { /* luego */ }
       }
     }
   }, 100);

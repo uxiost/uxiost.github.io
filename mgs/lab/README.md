@@ -35,7 +35,7 @@ software con muy poca CPU (no es lo que pasa en la tele).
 | Medida | Umbral |
 |---|---|
 | fps que pinta la tele (requestVideoFrameCallback) | ≥ 25 |
-| retraso real p95 (hora codificada en la imagen y leída en la tele) | ≤ 200 ms |
+| retraso real p95 (hora codificada en la imagen y leída en la tele) | ≤ 200 ms (envío directo: ≤ 300 ms; en CI +100 ms) |
 | tirones de más de 200 ms | ≤ 1 |
 | el sonido sale por el reproductor multimedia (MSE) de la tele | pico > 0.1 |
 | recuperación tras congelar la página del móvil 6 s | ≤ 8 s |

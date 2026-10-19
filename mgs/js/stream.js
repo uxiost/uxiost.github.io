@@ -3,9 +3,9 @@
 // su navegador o en su Chromecast integrado mediante un receptor público que
 // carga páginas web (DashCast o URL Cast Receiver), sin registrar ninguna app.
 
-import { PEER_PREFIX } from "./protocol.js?v=20";
-import { report } from "./diag.js?v=20";
-import { readBackChannel } from "./backchan.js?v=20";
+import { PEER_PREFIX } from "./protocol.js?v=21";
+import { report } from "./diag.js?v=21";
+import { readBackChannel } from "./backchan.js?v=21";
 
 export const TV_PREFIX = PEER_PREFIX + "tv-";
 
@@ -654,10 +654,9 @@ export async function castPage(url, which = "dashcast", { force = false, fresh =
   const current = ctx.getCurrentSession();
   // Una sesión anterior puede tener ya nuestra página a pantalla completa (sin el
   // código del receptor que entiende "abre esta dirección"): empezar de cero.
-  if (current && (fresh || (current.getApplicationMetadata && current.getApplicationMetadata()?.applicationId !== r.appId))) {
-    ctx.endCurrentSession(true);
-  }
-  if (!ctx.getCurrentSession()) {
+  const replace = current && (fresh || (current.getApplicationMetadata && current.getApplicationMetadata()?.applicationId !== r.appId));
+  if (replace) ctx.endCurrentSession(true);
+  if (!current || replace) {
     const err = await ctx.requestSession();
     if (err) throw new Error(err === "cancel" ? "Cancelado" : `Chromecast: ${err}`);
   }

@@ -8,7 +8,7 @@
   <script>
     // Siempre la última versión: si la publicada no es la que se ha cargado
     // (caché del navegador o del service worker), se recarga una vez.
-    window.MGS_BUILD = "20";
+    window.MGS_BUILD = "21";
     (function () {
       if (MGS_BUILD.indexOf("__") === 0) return; // copia local de desarrollo
       fetch("version.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
@@ -61,7 +61,7 @@
     })();
   </script>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=20">
+  <link rel="stylesheet" href="css/style.css?v=21">
   <style>
     [hidden] { display: none !important; }
     html, body { background: #000; height: 100%; overflow: hidden; }
@@ -86,7 +86,7 @@
     <p class="muted" id="howto">En el móvil, abre <b>uxiost.github.io/mgs/play.html</b> → <b>Ver en la tele</b> y escribe:</p>
     <div class="code" id="code">·····</div>
     <p class="muted" id="state">Preparando…</p>
-    <p class="muted small">Al abrir esta pantalla suena un pitido corto: si lo oyes, el sonido de la tele funciona.</p>
+    <p class="muted small" id="beepNote">Al abrir esta pantalla suena un pitido corto: si lo oyes, el sonido de la tele funciona.</p>
     <p class="muted small">El juego corre en el móvil; esta pantalla solo muestra la imagen. Puedes jugar con un mando Bluetooth emparejado con la tele o con los botones de colores del mando de la tele.</p>
   </div>
   <button id="sound" class="primary" hidden>🔊 Pulsa OK para activar el sonido</button>
@@ -133,6 +133,7 @@
     const flags = new Set(flagList);
     const code = (hashCode || randomCode()).toLowerCase();
     $("#code").textContent = code.toUpperCase();
+    if (flags.has("noaudio")) $("#beepNote").hidden = true;
     if (fromPhone) {
       $("#howto").textContent = "Abierta desde tu móvil: se conecta solo, no hace falta escribir nada.";
       $("#code").style.fontSize = "clamp(1.5rem, 4vw, 3rem)";

@@ -285,7 +285,9 @@ const relaxed = !!process.env.CI;
 result.relaxed = relaxed;
 const pass = {
   fps: steady.shownFps >= Math.min(relaxed ? 20 : 25, sentFps * (relaxed ? 0.7 : 0.85)) && steady.shownFps >= (relaxed ? 14 : 18),
-  latency: steady.latencyMs.p95 != null && steady.latencyMs.p95 <= (result.phoneLimited || relaxed ? 300 : 200),
+  // El envío directo (MSE) guarda a propósito un colchón de ~0,1 s para no
+  // atascarse: su límite es 100 ms mayor que el de WebRTC.
+  latency: steady.latencyMs.p95 != null && steady.latencyMs.p95 <= (result.phoneLimited || relaxed ? 300 : 200) + (NATIVE ? 100 : 0),
   stalls: steady.stalls200ms <= (result.phoneLimited || relaxed ? 5 : 1),
   audio: audio.peak > 0.1,
   recovery: recoverMs != null && recoverMs <= 8000,
