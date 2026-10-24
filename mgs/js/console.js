@@ -1,13 +1,13 @@
 // Consola: ejecuta el emulador de PS1 (EmulatorJS, núcleo PCSX-ReARMed en
 // WebAssembly), recibe mandos remotos por WebRTC y hace autoguardado.
 
-import * as store from "./storage.js?v=24";
-import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=24";
-import { attachTouchPad, PAD_HTML } from "./padui.js?v=24";
-import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=24";
-import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=24";
-import { startNative, tvShowing } from "./native.js?v=24";
-import { report } from "./diag.js?v=24";
+import * as store from "./storage.js?v=78";
+import { PEER_PREFIX, BUTTONS, BUTTON_COUNT, randomCode, formatBytes, timeAgo } from "./protocol.js?v=78";
+import { attachTouchPad, PAD_HTML } from "./padui.js?v=78";
+import { parseArchiveUrl, listArchiveOptions, fetchOption, fetchGeneric, guessSlot } from "./fetcher.js?v=78";
+import { installAudioTap, setLocalMuted, streamTo, castPage, castTransport, rejoinCast, getAudioTrack } from "./stream.js?v=78";
+import { startNative, tvShowing } from "./native.js?v=78";
+import { report } from "./diag.js?v=78";
 
 // Antes de que arranque el emulador: así podemos mandar su audio a la tele.
 installAudioTap();
@@ -801,10 +801,22 @@ function applySound() {
 }
 
 // Escala del lienzo de 960×720 dentro de la zona de juego (ver style.css).
-new ResizeObserver(() => {
+const sizeGameCanvas = () => {
   const g = $("#game");
-  if (g.clientWidth) g.style.setProperty("--tvs", String(g.clientWidth / 960));
-}).observe($("#game"));
+  // El núcleo dimensiona su lienzo en píxeles reales de la pantalla (ResizeObserver
+  // con devicePixelContentBoxSize): con 960px CSS en el Pixel (densidad 2,625) salía
+  // a 2520×1890 —25 veces lo que se envía— y la GPU iba al 116 %. Caja de 960/dpr
+  // píxeles CSS = lienzo de 960×720 de verdad, ampliado con transform para verse.
+  const cssW = 960 / (window.devicePixelRatio || 1);
+  const p = g.querySelector(".ejs_canvas_parent");
+  if (p && document.body.classList.contains("tvstream")) {
+    p.style.setProperty("width", cssW + "px", "important");
+    p.style.setProperty("height", cssW * 0.75 + "px", "important");
+  } else if (p) { p.style.removeProperty("width"); p.style.removeProperty("height"); }
+  if (g.clientWidth) g.style.setProperty("--tvs", String(g.clientWidth / (p && document.body.classList.contains("tvstream") ? cssW : 960)));
+};
+new ResizeObserver(sizeGameCanvas).observe($("#game"));
+new MutationObserver(sizeGameCanvas).observe(document.body, { attributes: true, attributeFilter: ["class"] });
 
 const gameCanvas = () => (started && window.EJS_emulator && window.EJS_emulator.started ? window.EJS_emulator.canvas : null);
 
@@ -860,6 +872,12 @@ async function tryNative(cast, tvCode) {
   try { transport = castTransport(cast); } catch (e) { report("phone", "native-error", { msg: String(e) }); return; }
   const sender = await startNative(transport, {
     getCanvas: gameCanvas, getAudioTrack, alive, report, waitMs: 20000,
+    stamp: params.has("stamp"),
+    noImg: params.get("codec") === "h264", // play.html?codec=h264: el envío anterior (vídeo H.264 por MSE)
+    imgW: Number(params.get("img")) || null, // ancho (alto 3/4): tiles 640, img 480 por defecto
+    mode: params.get("mode"),
+    tunnel: params.get("tunnel") !== "0", // play.html?tunnel=0: el vídeo solo por Cast // play.html?mode=img: el modo de imágenes WebP en vez de bloques
+    imgType: params.get("fmt") === "jpeg" ? "image/jpeg" : "image/webp", // play.html?fmt=jpeg // ancho de las imágenes (alto 3/4): play.html?img=640 // play.html?stamp: hora en la imagen, para medir el retraso con una cámara
     onStatus: msg => { if (tvNative === sender) { $("#tvState").textContent = msg; $("#tvState").style.color = "var(--accent)"; } },
     onTvKeys: m => applyMask(tvRemotePad, m),
   }).catch(e => { report("phone", "native-error", { msg: String(e) }); return null; });
@@ -872,7 +890,7 @@ async function tryNative(cast, tvCode) {
   applySound();
   report("phone", "native-on", { tv: tvCode, codec: sender.stats.codec, audio: sender.stats.audio });
   const t0 = Date.now();
-  let blind = 0, everShown = false, restarts = [];
+  let blind = 0, everShown = false, restarts = [], lastEnd = null;
   const fallback = why => {
     if (tvNative !== sender) return;
     report("phone", "native-fallback", { tv: tvCode, why, stats: { ...sender.stats, tv: undefined }, tvStats: sender.stats.tv });
@@ -887,8 +905,17 @@ async function tryNative(cast, tvCode) {
     if (visible && gameCanvas() && Date.now() - sender.lastTvStatsAt > 10000) return fallback("sin respuesta de la tele");
     const tv = st.tv;
     if (tvShowing(tv)) everShown = true;
-    if (visible && gameCanvas() && Date.now() - t0 > 8000 && !tvShowing(tv)) blind++; else blind = 0;
-    if (blind < 3) return;
+    // Si lo que falla es el envío (cola de mensajes llena en el móvil), reiniciar no
+    // arregla nada y en la LG cuesta 2-5 s sin imagen: de eso se encarga el ajuste
+    // de caudal. Solo se reinicia si la tele no muestra nada con el envío al día.
+    const backlog = sender.pending > 10;
+    // Si a la tele le siguen llegando datos (su búfer crece), está esperando o
+    // recuperándose sola: un reinicio solo añadiría segundos sin imagen.
+    const vEnd = tv && tv.ends ? tv.ends.v : null;
+    const receiving = vEnd != null && lastEnd != null && vEnd > lastEnd;
+    lastEnd = vEnd;
+    if (visible && gameCanvas() && Date.now() - t0 > 8000 && !tvShowing(tv) && !backlog && !receiving) blind++; else blind = 0;
+    if (blind < 4) return;
     blind = 0;
     // Si ya se vio en la tele, el envío directo funciona en esta tele: se reinicia
     // (WebRTC puede ni conectar en esta red). Solo si nunca se vio, o si reiniciar

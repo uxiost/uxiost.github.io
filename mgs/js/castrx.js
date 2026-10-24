@@ -17,12 +17,13 @@ export async function castReceiverTransport() {
   const listeners = [];
   let sender = null, ns = null;
   const deliver = (n, ev) => {
+    const at = performance.timeOrigin + performance.now(); // llegada a la página (medidas de retraso)
     let data = ev.data;
     if (typeof data === "string") { try { data = JSON.parse(data); } catch (e) { return; } }
     // Las consultas de diagnóstico (otro equipo de la red mirando la tele) no
     // cambian a quién van las estadísticas: siguen yendo al móvil.
-    if (!(data && (data.t === "dump" || data.t === "dbg"))) { sender = ev.senderId; ns = n; }
-    for (const l of listeners) l(data, { from: ev.senderId, ns: n });
+    if (!(data && (data.t === "dump" || data.t === "dbg" || data.t === "snap"))) { sender = ev.senderId; ns = n; }
+    for (const l of listeners) l(data, { from: ev.senderId, ns: n, at });
   };
   return {
     // `to`: responder a un emisor concreto (el que preguntó).

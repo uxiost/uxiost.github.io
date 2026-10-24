@@ -11,6 +11,7 @@
 // en el ping se sabe si un mensaje de ese tamaño llegó. Las consultas (dump, dbg)
 // no le quitan las estadísticas al móvil que esté enviando.
 
+import fs from "fs";
 import { connectCast, NS } from "./castv2.mjs";
 
 const HOST = process.argv[2] || "192.168.1.131";
@@ -27,7 +28,7 @@ const hellos = [];
 const answers = new Map();
 const watch = () => c.on(NS.dashcast, m => {
   if (m && m.t === "hello") hellos.push({ at: Date.now(), m });
-  else if (m && (m.t === "dumpr" || m.t === "dbgr") && answers.has(m.id)) { answers.get(m.id)(m); answers.delete(m.id); }
+  else if (m && (m.t === "dumpr" || m.t === "dbgr" || m.t === "snapr") && answers.has(m.id)) { answers.get(m.id)(m); answers.delete(m.id); }
   else if (m && m.t && !has("--quiet")) log("tv:", JSON.stringify(m).slice(0, 200));
 });
 watch();
@@ -41,10 +42,17 @@ const ask = (obj, ms = 5000) => new Promise(res => {
 
 // Consultas a la página que ya está abierta (sin saludar: el saludo le quitaría
 // las respuestas al móvil).
+// --snap archivo.jpg: captura pequeña de lo que pinta la tele (modos img/tiles).
+const snapArg = process.argv.indexOf("--snap");
+if (snapArg > 0) {
+  const r = await new Promise(res => { const id = ++qid; answers.set(id, res); c.send(NS.dashcast, app.transportId, { t: "snap", id }); setTimeout(() => res(null), 15000); });
+  if (r && r.r) { fs.writeFileSync(process.argv[snapArg + 1], Buffer.from(r.r, "base64")); console.log("captura:", process.argv[snapArg + 1]); } else console.log("sin captura");
+  c.close(); process.exit(0);
+}
 const evalArg = process.argv.indexOf("--eval");
 if (has("--dump") || has("--watch") || evalArg > 0) {
   do {
-    const r = evalArg > 0 ? await ask({ t: "dbg", e: process.argv[evalArg + 1] }) : await ask({ t: "dump" });
+    const r = evalArg > 0 ? await ask({ t: "dbg", e: process.argv[evalArg + 1] }, 90000) : await ask({ t: "dump" });
     console.log(has("--watch") ? new Date().toISOString().slice(11, 23) + " " + JSON.stringify(r && r.r) : JSON.stringify(r && r.r, null, 1));
     if (has("--watch")) await sleep(1000);
   } while (has("--watch") && !c.closed);

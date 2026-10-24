@@ -80,10 +80,15 @@ export async function connectCast(host, { port = 8009, src = "sender-mac", log =
       let app = (st.applications || []).find(a => a.appId === appId);
       // LAUNCH de la app que ya está abierta no la reinicia: pararla antes.
       if (app && fresh) { await c.stop(app.sessionId).catch(() => {}); app = null; }
-      if (!app) {
-        const r = await c.request(NS.recv, "receiver-0", { type: "LAUNCH", appId }, 20000);
-        app = (r.status.applications || []).find(a => a.appId === appId);
-        if (!app) throw new Error("no se abrió " + appId + ": " + JSON.stringify(r));
+      // (Justo después de pararla, la tele a veces contesta LAUNCH sin estado: reintentar.)
+      for (let i = 0; i < 4 && !app; i++) {
+        const r = await c.request(NS.recv, "receiver-0", { type: "LAUNCH", appId }, 20000).catch(e => ({ error: String(e) }));
+        app = ((r.status && r.status.applications) || []).find(a => a.appId === appId);
+        if (!app) {
+          await new Promise(res => setTimeout(res, 1500));
+          app = ((await c.status().catch(() => ({}))).applications || []).find(a => a.appId === appId);
+        }
+        if (!app && i === 3) throw new Error("no se abrió " + appId + ": " + JSON.stringify(r));
       }
       c.connect(app.transportId);
       return app;

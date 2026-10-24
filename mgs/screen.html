@@ -8,7 +8,7 @@
   <script>
     // Siempre la última versión: si la publicada no es la que se ha cargado
     // (caché del navegador o del service worker), se recarga una vez.
-    window.MGS_BUILD = "24";
+    window.MGS_BUILD = "78";
     (function () {
       if (MGS_BUILD.indexOf("__") === 0) return; // copia local de desarrollo
       fetch("version.json?t=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (j) {
@@ -61,7 +61,7 @@
     })();
   </script>
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="css/style.css?v=24">
+  <link rel="stylesheet" href="css/style.css?v=78">
   <style>
     [hidden] { display: none !important; }
     html, body { background: #000; height: 100%; overflow: hidden; }
@@ -108,7 +108,8 @@
     const { mseAudioSupported, startMseAudio, beep } = await import("./js/tvaudio.js" + q);
     setInterval(async () => {
       const v = await fetch("version.json", { cache: "no-store" }).then(r => r.json()).then(j => j.v).catch(() => version);
-      if (v !== version) location.reload();
+      // Nunca en mitad de una partida: solo si no está mostrando el juego.
+      if (v !== version && !(nativeRx && nativeRx.active) && !(currentCall && video.srcObject)) location.reload();
     }, 60000);
 
     // Un candidato de red que este motor no entiende (p. ej. direcciones .local de
@@ -427,11 +428,13 @@
           return;
         }
       } else return;
-      let nTicks = 0;
+      let nTicks = 0, leaving = false; // leaving: nos vamos a otra página; que conteste la nueva
       nativeRx = startNativeReceiver(t, video, {
         getKeys: () => padMask,
         noRate: flags.has("norate"),
         noRvfc: flags.has("norvfc"),
+        wc: flags.has("wc"),
+        split: flags.has("split"),
         onStart: () => {
           $("#wait").hidden = true;
           $("#sound").hidden = true;
@@ -451,10 +454,11 @@
       });
       window.__mgsNative = nativeRx;
       t.onMessage(async (m, from) => {
-        if (m && m.t === "ping") t.send({ t: "hello", mse: nativeSupport(), viewport: [innerWidth, innerHeight, devicePixelRatio], v: version });
+        if (m && m.t === "ping" && !leaving) t.send({ t: "hello", mse: nativeSupport(), img: typeof createImageBitmap === "function", tiles: typeof createImageBitmap === "function", viewport: [innerWidth, innerHeight, devicePixelRatio], v: version });
         // Diagnóstico desde otro equipo de la red (lab/tvprobe.mjs): el estado del
         // reproductor siempre; evaluar código solo si se abrió con ;dbg.
         else if (m && m.t === "dump") t.send({ t: "dumpr", id: m.id, v: version, r: nativeRx.dump() }, from);
+        else if (m && m.t === "snap") t.send({ t: "snapr", id: m.id, r: await nativeRx.snap() }, from);
         else if (m && m.t === "dbg" && flags.has("dbg")) {
           let r;
           try { r = await (0, eval)(m.e); r = JSON.parse(JSON.stringify(r === undefined ? null : r)); } catch (e) { r = { error: String(e) }; }
@@ -462,7 +466,7 @@
         }
         // Mensaje de receptor DashCast/URL Cast ("abre esta dirección"): ahora el
         // receptor somos nosotros, así que lo hacemos nosotros.
-        else if (m && typeof m.url === "string" && /^https:\/\//.test(m.url)) location.href = m.url;
+        else if (m && typeof m.url === "string" && /^https:\/\//.test(m.url)) { leaving = true; location.href = m.url; }
       });
     })();
 
